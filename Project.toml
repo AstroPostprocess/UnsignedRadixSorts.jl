@@ -1,6 +1,12 @@
-name = "YOURTEMPLETE"
-uuid = "123e4567-e89b-12d3-a456-426614174000"
+name = "UnsignedIntegerRadixSort"
+uuid = "e1bfd048-42a8-4772-9544-9f10a701856e"
 version = "0.1.0"
 authors = ["Wei-Shan Su <weishansu011017@gmail.com>"]
 
 [deps]
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
