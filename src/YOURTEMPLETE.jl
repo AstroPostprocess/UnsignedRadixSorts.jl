@@ -1,0 +1,2 @@
+module YOURTEMPLETE
+end
