@@ -25,21 +25,21 @@ end
 
 
 """
-    radix_scatter!(out_codes :: VC, out_order :: VO, offsets :: VI, codes :: VC, order :: VO, v :: Val{N}) where {N, T <: Unsigned, VC <: AbstractVector{T}, VO <: AbstractVector{Int}, VI <: AbstractVector{Int}}
+    radix_scatter!(out_codes :: VO, out_order :: VOO, offsets :: VI, codes :: VC, order :: VOI, v :: Val{N}) where {N, T <: Unsigned, VO <: AbstractVector{T}, VC <: AbstractVector{T}, VOO <: AbstractVector{Int}, VOI <: AbstractVector{Int}, VI <: AbstractVector{Int}}
 
 Stably scatter `codes` and their associated permutation indices from the current pass input buffers into the corresponding output buffers for pass `N`.
 
 For each element in `codes`, the function recomputes its radix bucket for the `N`-th 8-bit digit, writes the key to the next available output position for that bucket in `out_codes`, writes the associated source index from `order` to the same position in `out_order`, and then advances the corresponding bucket cursor in `offsets`. The `offsets` buffer is therefore mutated in-place during scattering and acts as a set of per-bucket write cursors rather than immutable bucket start positions.
 
 # Parameters
-- `out_codes :: VC`: Output buffer receiving the reordered unsigned keys for the current radix pass.
-- `out_order :: VO`: Output buffer receiving the reordered permutation indices corresponding to `out_codes`.
+- `out_codes :: VO`: Output buffer receiving the reordered unsigned keys for the current radix pass.
+- `out_order :: VOO`: Output buffer receiving the reordered permutation indices corresponding to `out_codes`.
 - `offsets :: VI`: Per-bucket write positions for the current pass. It is mutated in-place during scattering and is expected to contain the 1-based bucket start positions before the call.
 - `codes :: VC`: Input buffer containing the unsigned keys in the current source order.
-- `order :: VO`: Input permutation buffer associated with `codes`. Each entry tracks the original position of the corresponding key.
+- `order :: VOI`: Input permutation buffer associated with `codes`. Each entry tracks the original position of the corresponding key.
 - `v :: Val{N}`: Compile-time pass selector indicating which 8-bit digit to use. `Val(1)` selects the least significant byte, `Val(2)` the next byte, and so on.
 """
-@inline function radix_scatter!(out_codes :: VC, out_order :: VO, offsets :: VI, codes :: VC, order :: VO, v :: Val{N}) where {N, T <: Unsigned, VC <: AbstractVector{T}, VO <: AbstractVector{Int}, VI <: AbstractVector{Int}}
+@inline function radix_scatter!(out_codes :: VO, out_order :: VOO, offsets :: VI, codes :: VC, order :: VOI, v :: Val{N}) where {N, T <: Unsigned, VO <: AbstractVector{T}, VC <: AbstractVector{T}, VOO <: AbstractVector{Int}, VOI <: AbstractVector{Int}, VI <: AbstractVector{Int}}
     @inbounds for i in eachindex(codes)
         bucket = _radix_bucket(codes[i], v)
         j = offsets[bucket]

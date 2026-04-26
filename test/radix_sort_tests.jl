@@ -470,6 +470,21 @@ end
             @test length(perm_ws.tmp_order) == 17
             @test length(perm_ws.counts) == 256
             @test length(perm_ws.offsets) == 256
+
+            tmp_codes = view(Vector{T}(undef, 19), 2:18)
+            order = view(Vector{Int}(undef, 19), 2:18)
+            tmp_order = view(Vector{Int}(undef, 19), 2:18)
+            counts = view(Vector{Int}(undef, 258), 2:257)
+            offsets = view(Vector{Int}(undef, 258), 2:257)
+            custom_perm_ws = RadixSortPermWorkspace(tmp_codes, order, tmp_order, counts, offsets)
+            @test custom_perm_ws isa RadixSortPermWorkspace{T, typeof(tmp_codes), typeof(order), typeof(counts)}
+
+            codes = deterministic_codes(T, 17, UInt64(0x51a7e))
+            original = copy(codes)
+            custom_order = radix_sortperm!(codes, custom_perm_ws)
+            @test custom_order === custom_perm_ws.order
+            @test codes == sort(original)
+            @test codes == original[custom_order]
         end
     end
 

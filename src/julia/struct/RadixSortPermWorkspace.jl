@@ -1,5 +1,5 @@
 """
-    RadixSortPermWorkspace{T <: Unsigned}
+    RadixSortPermWorkspace{T <: Unsigned, VT <: AbstractVector{T}, VO <: AbstractVector{Int}, VI <: AbstractVector{Int}}
 
 Workspace for allocation-free calls to [`radix_sortperm!`](@ref).
 
@@ -11,18 +11,18 @@ it is overwritten by the next call that reuses the same workspace.
 
 # Fields
 
-- `tmp_codes :: Vector{T}`: Temporary key buffer used by alternating radix passes.
-- `order :: Vector{Int}`: Permutation buffer describing the sorted arrangement.
-- `tmp_order :: Vector{Int}`: Temporary permutation buffer paired with `tmp_codes`.
-- `counts :: Vector{Int}`: Histogram buffer for the 256 radix buckets.
-- `offsets :: Vector{Int}`: Buffer for 1-based bucket start positions and scatter cursors.
+- `tmp_codes :: VT`: Temporary key buffer used by alternating radix passes.
+- `order :: VO`: Permutation buffer describing the sorted arrangement.
+- `tmp_order :: VO`: Temporary permutation buffer paired with `tmp_codes`.
+- `counts :: VI`: Histogram buffer for the 256 radix buckets.
+- `offsets :: VI`: Buffer for 1-based bucket start positions and scatter cursors.
 """
-struct RadixSortPermWorkspace{T <: Unsigned}
-    tmp_codes :: Vector{T}
-    order     :: Vector{Int}
-    tmp_order :: Vector{Int}
-    counts    :: Vector{Int}
-    offsets   :: Vector{Int}
+struct RadixSortPermWorkspace{T <: Unsigned, VT <: AbstractVector{T}, VO <: AbstractVector{Int}, VI <: AbstractVector{Int}}
+    tmp_codes :: VT
+    order     :: VO
+    tmp_order :: VO
+    counts    :: VI
+    offsets   :: VI
 end
 
 """
