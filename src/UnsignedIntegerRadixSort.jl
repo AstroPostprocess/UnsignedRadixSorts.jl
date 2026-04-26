@@ -1,7 +1,8 @@
 module UnsignedIntegerRadixSort
 
 # Include source files.
-include(joinpath("julia", "struct", "workspace.jl"))
+include(joinpath("julia", "struct", "RadixSortWorkspace.jl"))
+include(joinpath("julia", "struct", "RadixSortPermWorkspace.jl"))
 include(joinpath("julia", "operations", "radix_bucket.jl"))
 include(joinpath("julia", "operations", "radix_histogram.jl"))
 include(joinpath("julia", "operations", "radix_offsets.jl"))
