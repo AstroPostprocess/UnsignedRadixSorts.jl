@@ -1,5 +1,5 @@
 """
-    RadixSortPermWorkspace{T <: Unsigned, VT <: AbstractVector{T}, VO <: AbstractVector{Int}, VI <: AbstractVector{Int}}
+    RadixSortPermWorkspace{T <: Unsigned, TI <: Integer, VT <: AbstractVector{T}, VO <: AbstractVector{Int}, MI <: AbstractMatrix{TI}}
 
 Workspace for allocation-free calls to [`radix_sortperm!`](@ref).
 
@@ -14,15 +14,16 @@ it is overwritten by the next call that reuses the same workspace.
 - `tmp_codes :: VT`: Temporary key buffer used by alternating radix passes.
 - `order :: VO`: Permutation buffer describing the sorted arrangement.
 - `tmp_order :: VO`: Temporary permutation buffer paired with `tmp_codes`.
-- `counts :: VI`: Histogram buffer for the 256 radix buckets.
-- `offsets :: VI`: Buffer for 1-based bucket start positions and scatter cursors.
+- `counts :: MI`: Histogram buffer for the 256 radix buckets in each chunk.
+- `offsets :: MI`: Buffer for 1-based bucket start positions and scatter cursors in each chunk.
 """
-struct RadixSortPermWorkspace{T <: Unsigned, VT <: AbstractVector{T}, VO <: AbstractVector{Int}, VI <: AbstractVector{Int}}
+struct RadixSortPermWorkspace{T <: Unsigned, TI <: Integer, VT <: AbstractVector{T}, VO <: AbstractVector{Int}, MI <: AbstractMatrix{TI}}
+    nchunks   :: Int
     tmp_codes :: VT
     order     :: VO
     tmp_order :: VO
-    counts    :: VI
-    offsets   :: VI
+    counts    :: MI
+    offsets   :: MI
 end
 
 """
@@ -38,12 +39,14 @@ on vectors of `n` unsigned elements of type `T`.
 """
 function RadixSortPermWorkspace(::Type{T}, n :: Integer) where {T <: Unsigned}
     n >= 0 || throw(ArgumentError("workspace length must be non-negative, got $n"))
+    nchunks = Threads.nthreads()
     return RadixSortPermWorkspace(
+        nchunks,
         Vector{T}(undef, n),
         Vector{Int}(undef, n),
         Vector{Int}(undef, n),
-        Vector{Int}(undef, 256),
-        Vector{Int}(undef, 256),
+        Matrix{Int}(undef, 256, nchunks),
+        Matrix{Int}(undef, 256, nchunks),
     )
 end
 
@@ -55,10 +58,20 @@ end
         throw(DimensionMismatch("workspace order length $(length(ws.order)) does not match codes length $n"))
     length(ws.tmp_order) == n ||
         throw(DimensionMismatch("workspace tmp_order length $(length(ws.tmp_order)) does not match codes length $n"))
-    length(ws.counts) == 256 ||
-        throw(DimensionMismatch("workspace counts length must be 256"))
-    length(ws.offsets) == 256 ||
-        throw(DimensionMismatch("workspace offsets length must be 256"))
+    size(ws.counts, 1) == 256 ||
+        throw(DimensionMismatch("workspace counts must have 256 rows"))
+    size(ws.offsets, 1) == 256 ||
+        throw(DimensionMismatch("workspace offsets must have 256 rows"))
+    ws.nchunks >= 1 ||
+        throw(DimensionMismatch("workspace nchunks must be at least 1"))
+    size(ws.counts, 2) >= 1 ||
+        throw(DimensionMismatch("workspace counts must have at least one chunk column"))
+    size(ws.offsets, 2) >= 1 ||
+        throw(DimensionMismatch("workspace offsets must have at least one chunk column"))
+    size(ws.counts, 2) >= ws.nchunks ||
+        throw(DimensionMismatch("workspace counts columns $(size(ws.counts, 2)) do not cover nchunks $(ws.nchunks)"))
+    size(ws.offsets, 2) >= ws.nchunks ||
+        throw(DimensionMismatch("workspace offsets columns $(size(ws.offsets, 2)) do not cover nchunks $(ws.nchunks)"))
     return nothing
 end
 

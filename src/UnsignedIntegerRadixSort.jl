@@ -1,5 +1,7 @@
 module UnsignedIntegerRadixSort
 
+using .Threads
+
 # Include source files.
 include(joinpath("julia", "struct", "RadixSortWorkspace.jl"))
 include(joinpath("julia", "struct", "RadixSortPermWorkspace.jl"))

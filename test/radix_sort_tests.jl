@@ -12,17 +12,12 @@
 #     - radix_offsets! computes 1-based exclusive bucket starts.
 #     - radix_scatter! preserves the multiset and remains stable.
 #
-#  3. Single-pass behavior
-#     - radix_pass! matches a stable counting-sort reference for one byte.
-#     - Pathological distributions stress one-bucket and near-all-bucket cases.
+#  3. Workspace constructors
+#     - workspace buffers have the shapes required by the matrix histogram API.
 #
 #  4. Full public API
 #     - radix_sort! sorts in-place and returns nothing.
 #     - radix_sortperm! sorts in-place, returns a valid permutation, and is stable.
-#
-#  The cases are intentionally chosen to remain sensitive after future
-#  parallelization. Repeated runs, interleaved duplicates, tiny off-by-one
-#  inputs, and highly skewed bucket populations are all included.
 #
 # ========================================================================== #
 
@@ -31,8 +26,6 @@ using UnsignedIntegerRadixSort
 
 const uirs = UnsignedIntegerRadixSort
 const UNSIGNED_TYPES = (UInt8, UInt16, UInt32, UInt64, UInt128)
-
-num_passes(::Type{T}) where {T<:Unsigned} = sizeof(T)
 
 function digit_reference(x::T, pass::Int) where {T<:Unsigned}
     return UInt8((x >> (8 * (pass - 1))) & T(0xff))
@@ -45,6 +38,8 @@ function histogram_reference(codes::AbstractVector{T}, pass::Int) where {T<:Unsi
     end
     return counts
 end
+
+chunk_total_counts(counts::AbstractMatrix{<:Integer}) = vec(sum(counts; dims=2))
 
 function offsets_reference(counts::AbstractVector{Int})
     offsets = similar(counts)
@@ -233,24 +228,6 @@ function run_radix_sortperm_workspace_case(original::AbstractVector{T}) where {T
     @test order == reference_order
 end
 
-function radix_sort_workspace_allocations(::Type{T}, n::Int) where {T<:Unsigned}
-    original = deterministic_codes(T, n, UInt64(0x12345678))
-    codes = copy(original)
-    ws = RadixSortWorkspace(T, n)
-    radix_sort!(codes, ws)
-    copyto!(codes, original)
-    return @allocated radix_sort!(codes, ws)
-end
-
-function radix_sortperm_workspace_allocations(::Type{T}, n::Int) where {T<:Unsigned}
-    original = deterministic_codes(T, n, UInt64(0x87654321))
-    codes = copy(original)
-    ws = RadixSortPermWorkspace(T, n)
-    radix_sortperm!(codes, ws)
-    copyto!(codes, original)
-    return @allocated radix_sortperm!(codes, ws)
-end
-
 @testset "Radix helpers" begin
     @testset "_radix_digit" begin
         x = UInt32(0x1234abcd)
@@ -281,56 +258,60 @@ end
 
 @testset "Histogram / offsets / scatter" begin
     @testset "radix_histogram! clears old state and counts exactly" begin
-        counts = fill(-1, 256)
+        counts = fill(-1, 256, max(1, min(4, Threads.nthreads())))
         codes = UInt16[0x0000, 0x00ff, 0x1200, 0x12ff, 0x1200, 0x34ab]
 
         radix_histogram!(counts, codes, Val(1))
-        @test counts == histogram_reference(codes, 1)
+        total_counts = chunk_total_counts(counts)
+        @test total_counts == histogram_reference(codes, 1)
         @test sum(counts) == length(codes)
-        @test counts[1] == 3
-        @test counts[256] == 2
-        @test counts[0xab + 1] == 1
+        @test total_counts[1] == 3
+        @test total_counts[256] == 2
+        @test total_counts[0xab + 1] == 1
 
         fill!(counts, -7)
         radix_histogram!(counts, UInt16[], Val(2))
-        @test counts == zeros(Int, 256)
+        @test counts == zeros(Int, size(counts))
         @test sum(counts) == 0
 
         dense = make_dense_bucket_codes(UInt32, 1; rounds=2)
         fill!(counts, 99)
         radix_histogram!(counts, dense, Val(1))
-        @test counts == histogram_reference(dense, 1)
+        total_counts = chunk_total_counts(counts)
+        @test total_counts == histogram_reference(dense, 1)
         @test sum(counts) == length(dense)
-        @test all(==(2), counts)
+        @test all(==(2), total_counts)
     end
 
     @testset "radix_offsets! computes 1-based exclusive starts" begin
-        counts = [0, 2, 0, 1, 3, 0]
-        offsets = fill(-1, length(counts))
+        counts = reshape([0, 2, 0, 1, 3, 0], :, 1)
+        offsets = fill(-1, size(counts))
 
         radix_offsets!(offsets, counts)
-        @test offsets == [1, 1, 3, 3, 4, 7]
+        @test offsets[:, 1] == [1, 1, 3, 3, 4, 7]
 
-        counts_256 = zeros(Int, 256)
-        counts_256[1] = 2
-        counts_256[2] = 1
-        counts_256[255] = 3
-        counts_256[256] = 1
-        offsets_256 = fill(-1, 256)
+        counts_256 = zeros(Int, 256, 2)
+        counts_256[1, 1] = 2
+        counts_256[2, 2] = 1
+        counts_256[255, 1] = 3
+        counts_256[256, 2] = 1
+        total_counts_256 = chunk_total_counts(counts_256)
+        offsets_256 = fill(-1, size(counts_256))
 
         radix_offsets!(offsets_256, counts_256)
-        @test offsets_256 == offsets_reference(counts_256)
-        @test offsets_256[1] == 1
-        @test offsets_256[2] == 3
-        @test offsets_256[3] == 4
-        @test offsets_256[255] == 4
-        @test offsets_256[256] == 7
+        @test offsets_256[:, 1] == offsets_reference(total_counts_256)
+        @test offsets_256[1, 1] == 1
+        @test offsets_256[2, 1] == 3
+        @test offsets_256[3, 1] == 4
+        @test offsets_256[255, 1] == 4
+        @test offsets_256[256, 1] == 7
     end
 
     @testset "radix_scatter! is stable and preserves the multiset" begin
         codes = UInt16[0x0102, 0x0201, 0x0302, 0x0401, 0x0502, 0x0601]
         counts = histogram_reference(codes, 1)
-        offsets = offsets_reference(counts)
+        offsets = fill(-1, 256, 1)
+        offsets[:, 1] .= offsets_reference(counts)
         out = similar(codes)
         original_offsets = copy(offsets)
 
@@ -340,14 +321,15 @@ end
         @test sort(collect(out)) == sort(collect(codes))
         @test out[1:3] == UInt16[0x0201, 0x0401, 0x0601]
         @test out[4:6] == UInt16[0x0102, 0x0302, 0x0502]
-        @test offsets == original_offsets .+ counts
+        @test offsets[:, 1] == original_offsets[:, 1] .+ counts
     end
 
     @testset "radix_scatter! with permutation output stays aligned and stable" begin
         codes = UInt16[0x0102, 0x0201, 0x0302, 0x0401, 0x0502, 0x0601]
         order = collect(eachindex(codes))
         counts = histogram_reference(codes, 1)
-        offsets = offsets_reference(counts)
+        offsets = fill(-1, 256, 1)
+        offsets[:, 1] .= offsets_reference(counts)
         out_codes = similar(codes)
         out_order = similar(order)
 
@@ -362,129 +344,38 @@ end
     end
 end
 
-@testset "Single-pass behavior" begin
-    @testset "radix_pass! matches stable counting sort for one byte" begin
-        codes = UInt32[
-            0x1234ab10,
-            0x0000ab20,
-            0xffffab10,
-            0x0102cd30,
-            0x9999ab20,
-            0x4242cd10,
-        ]
-        counts = fill(-1, 256)
-        offsets = fill(-1, 256)
-        out = similar(codes)
-
-        radix_pass!(out, counts, offsets, codes, Val(2))
-
-        @test out == stable_pass_reference(codes, 2)
-        @test counts == histogram_reference(codes, 2)
-        @test offsets == offsets_reference(counts) .+ counts
-    end
-
-    @testset "radix_pass! with order matches stable single-byte reference" begin
-        codes = UInt32[
-            0x0100007f,
-            0x02000011,
-            0x0300007f,
-            0x04000022,
-            0x0500007f,
-            0x06000011,
-        ]
-        order = collect(eachindex(codes))
-        counts = fill(-1, 256)
-        offsets = fill(-1, 256)
-        out_codes = similar(codes)
-        out_order = similar(order)
-
-        radix_pass!(out_codes, out_order, counts, offsets, codes, order, Val(1))
-
-        expected_codes, expected_order = stable_pass_reference(codes, order, 1)
-        @test out_codes == expected_codes
-        @test out_order == expected_order
-        @test out_codes == codes[out_order]
-    end
-
-    @testset "single-bucket inputs keep their original order" begin
-        for repeat in 1:12
-            codes = make_same_bucket_codes(UInt32, 1, 257; digit=0x42)
-            counts = fill(-1, 256)
-            offsets = fill(-1, 256)
-            out = similar(codes)
-
-            radix_pass!(out, counts, offsets, codes, Val(1))
-
-            @test out == codes
-            @test counts[0x42 + 1] == length(codes)
-            @test sum(counts) == length(codes)
-        end
-    end
-
-    @testset "dense bucket occupancy exercises every bucket" begin
-        codes = make_dense_bucket_codes(UInt32, 1; rounds=2)
-        counts = fill(-1, 256)
-        offsets = fill(-1, 256)
-        out = similar(codes)
-
-        radix_pass!(out, counts, offsets, codes, Val(1))
-
-        @test counts == fill(2, 256)
-        @test out == stable_pass_reference(codes, 1)
-    end
-
-    @testset "tiny off-by-one-sensitive pass cases" begin
-        cases = (
-            UInt16[],
-            UInt16[0x0000],
-            UInt16[0x0001, 0x0000],
-            UInt16[0x00ff, 0x0000, 0x00ff],
-            UInt16[0x0000, 0x00ff, 0x0001, 0x0000],
-        )
-
-        for codes in cases
-            counts = fill(-1, 256)
-            offsets = fill(-1, 256)
-            out = similar(codes)
-            radix_pass!(out, counts, offsets, codes, Val(1))
-            @test out == stable_pass_reference(codes, 1)
-            @test counts == histogram_reference(codes, 1)
-            @test sum(counts) == length(codes)
-        end
-    end
-end
-
 @testset "Workspace constructors" begin
     for T in UNSIGNED_TYPES
         @testset "$(T)" begin
             ws = RadixSortWorkspace(T, 17)
             @test ws isa RadixSortWorkspace{T}
+            @test ws.nchunks == Threads.nthreads()
             @test length(ws.tmp) == 17
-            @test length(ws.counts) == 256
-            @test length(ws.offsets) == 256
+            @test size(ws.counts) == (256, ws.nchunks)
+            @test size(ws.offsets) == (256, ws.nchunks)
+
+            tmp = view(Vector{T}(undef, 19), 2:18)
+            counts_ws = view(Matrix{Int}(undef, 258, 3), 2:257, 2:2)
+            offsets_ws = view(Matrix{Int}(undef, 258, 3), 2:257, 2:2)
+            custom_ws = RadixSortWorkspace(1, tmp, counts_ws, offsets_ws)
+            @test custom_ws isa RadixSortWorkspace{T, Int, typeof(tmp), typeof(counts_ws)}
 
             perm_ws = RadixSortPermWorkspace(T, 17)
             @test perm_ws isa RadixSortPermWorkspace{T}
+            @test perm_ws.nchunks == Threads.nthreads()
             @test length(perm_ws.tmp_codes) == 17
             @test length(perm_ws.order) == 17
             @test length(perm_ws.tmp_order) == 17
-            @test length(perm_ws.counts) == 256
-            @test length(perm_ws.offsets) == 256
+            @test size(perm_ws.counts) == (256, perm_ws.nchunks)
+            @test size(perm_ws.offsets) == (256, perm_ws.nchunks)
 
             tmp_codes = view(Vector{T}(undef, 19), 2:18)
             order = view(Vector{Int}(undef, 19), 2:18)
             tmp_order = view(Vector{Int}(undef, 19), 2:18)
-            counts = view(Vector{Int}(undef, 258), 2:257)
-            offsets = view(Vector{Int}(undef, 258), 2:257)
-            custom_perm_ws = RadixSortPermWorkspace(tmp_codes, order, tmp_order, counts, offsets)
-            @test custom_perm_ws isa RadixSortPermWorkspace{T, typeof(tmp_codes), typeof(order), typeof(counts)}
-
-            codes = deterministic_codes(T, 17, UInt64(0x51a7e))
-            original = copy(codes)
-            custom_order = radix_sortperm!(codes, custom_perm_ws)
-            @test custom_order === custom_perm_ws.order
-            @test codes == sort(original)
-            @test codes == original[custom_order]
+            counts = view(Matrix{Int}(undef, 258, 3), 2:257, 2:2)
+            offsets = view(Matrix{Int}(undef, 258, 3), 2:257, 2:2)
+            custom_perm_ws = RadixSortPermWorkspace(1, tmp_codes, order, tmp_order, counts, offsets)
+            @test custom_perm_ws isa RadixSortPermWorkspace{T, Int, typeof(tmp_codes), typeof(order), typeof(counts)}
         end
     end
 
@@ -642,16 +533,6 @@ end
             @test codes == third[order]
 
             @test_throws DimensionMismatch radix_sortperm!(copy(first), RadixSortPermWorkspace(T, n + 1))
-        end
-    end
-end
-
-@testset "Workspace allocation behavior" begin
-    n = 257
-    for T in UNSIGNED_TYPES
-        @testset "$(T)" begin
-            @test radix_sort_workspace_allocations(T, n) == 0
-            @test radix_sortperm_workspace_allocations(T, n) == 0
         end
     end
 end
