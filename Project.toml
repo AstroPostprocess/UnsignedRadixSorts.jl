@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["Wei-Shan Su <weishansu011017@gmail.com>"]
 
 [deps]
+Atomix = "a9b6321e-bd34-4604-b9c9-b65b8de01458"
+
+[compat]
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
