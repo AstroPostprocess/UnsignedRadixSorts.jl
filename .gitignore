@@ -26,3 +26,6 @@ __pycache__/
 **/temp/
 **/backup/
 **/sysimage/
+
+# Ref
+**/cccl
