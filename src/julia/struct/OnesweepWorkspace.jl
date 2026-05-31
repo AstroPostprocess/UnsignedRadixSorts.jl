@@ -1,3 +1,4 @@
+
 struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV <: AbstractVector{UInt32}}
     # Global storages
     ## Workspace for data
@@ -22,17 +23,20 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
     ## Length = 256 * ntiles for an 8-bit radix pass.
     lookback :: OffsetV
 
-    ## Bucket offsets; correspond to CUB d_bins_in / d_bins_out.
-    ##
-    ## Both buffers store 1-based Julia output indices.
-    ## bucket_offsets[1][bucket + 1] and bucket_offsets[2][bucket + 1]
-    ## are the first Julia indices for `bucket`, depending on the pass.
-    ##
-    ## Odd passes read bucket_offsets[1] and write bucket_offsets[2].
-    ## Even passes read bucket_offsets[2] and write bucket_offsets[1].
-    ##
-    ## Each buffer has length = 256 for an 8-bit radix pass.
-    bucket_offsets :: NTuple{2, OffsetV}
+    ## Bucket offsets; corresponds to CUB d_bins.
+    ## Stores 1-based Julia output start indices for every radix pass.
+    ## bucket_offsets[(pass - 1) * 256 + bucket] is the first Julia output index
+    ## for `bucket - 1` in `pass`, where `bucket ∈ 1:256`.
+    ## Length = 256 * _npasses(KeyT) for an 8-bit radix pass.
+    bucket_offsets :: OffsetV
+
+    ## Per-worker all-pass histograms used before Onesweep passes.
+    ## prepass_counts[(worker_id - 1) * _npasses(KeyT) * 256 +
+    ##                (pass - 1) * 256 +
+    ##                bucket]
+    ## stores the local count for `bucket - 1` in `pass`, where `bucket ∈ 1:256`.
+    ## Length = 256 * _npasses(KeyT) * nworkers.
+    prepass_counts :: OffsetV
 
     # Temporary storages
     ## Per-worker local histograms.
@@ -56,6 +60,12 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
     ## Length = 256 * nworkers.
     global_offsets :: OffsetV
 
+    ## Per-worker rank cursors.
+    ## rank_cursors[(worker_id - 1) * 256 + bucket] is a temporary cursor
+    ## used while assigning tile-local ranks for `bucket - 1`.
+    ## Length = 256 * nworkers.
+    rank_cursors :: OffsetV
+
     ## Per-worker local ranks.
     ## Corresponds to CUB's per-thread `ranks`, but stored as a flat
     ## per-worker scratch buffer in this CPU implementation.
@@ -71,8 +81,9 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
         tile_counter = similar(dst, UInt32, 0)
         lookback = similar(dst, UInt32, 0)
 
-        bucket_offsets_1 = similar(dst, UInt32, 0)
-        bucket_offsets_2 = similar(dst, UInt32, 0)
+        bucket_offsets = similar(dst, UInt32, 0)
+
+        prepass_counts = similar(dst, UInt32, 0)
 
         perm_1 = similar(dst, UInt32, 0)
         perm_2 = similar(dst, UInt32, 0)
@@ -81,47 +92,53 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
         local_counts   = similar(dst, UInt32, 0)
         local_offsets  = similar(dst, UInt32, 0)
         global_offsets = similar(dst, UInt32, 0)
+        rank_cursors   = similar(dst, UInt32, 0)
         local_ranks    = similar(dst, UInt32, 0)
 
         # Type stablizer
-        OffsetV  = typeof(bucket_offsets_1)
+        OffsetV  = typeof(bucket_offsets)
 
         return new{KeyT, KeyV, OffsetV}(
             dst,
             (perm_1, perm_2),
             tile_counter,
             lookback,
-            (bucket_offsets_1, bucket_offsets_2),
+            bucket_offsets,
+            prepass_counts,
             local_counts,
             local_offsets,
             global_offsets,
+            rank_cursors,
             local_ranks
         )
     end
 end
 
-function initialize_workspace!(ws :: OnesweepWorkspace, nelems :: Int, ntiles :: Int, :: Val{NWorkers}, :: Val{TileSize}) where {NWorkers, TileSize}
-    
+function initialize_workspace!(ws :: OnesweepWorkspace{KeyT}, nelems :: Int, ntiles :: Int, :: Val{NWorkers}, :: Val{TileSize}) where {KeyT <: Unsigned, NWorkers, TileSize}
+    npass = _npasses(KeyT)    
+
     resize!(ws.dst, nelems)
     resize!(ws.tile_counter, 1)
     resize!(ws.lookback, 256 * ntiles)
 
-    resize!(ws.bucket_offsets[1], 256)
-    resize!(ws.bucket_offsets[2], 256)
+    resize!(ws.bucket_offsets, 256 * npass)
+    resize!(ws.prepass_counts, 256 * npass * NWorkers)
 
     resize!(ws.local_counts,  256 * NWorkers)
     resize!(ws.local_offsets, 256 * NWorkers)
     resize!(ws.global_offsets, 256 * NWorkers)
+    resize!(ws.rank_cursors,   256 * NWorkers)
     resize!(ws.local_ranks,   TileSize * NWorkers)
 
     fill!(ws.tile_counter, zero(UInt32))
     fill!(ws.lookback, zero(UInt32))
-    fill!(ws.bucket_offsets[1], zero(UInt32))
-    fill!(ws.bucket_offsets[2], zero(UInt32))
+    fill!(ws.bucket_offsets, zero(UInt32))
+    fill!(ws.prepass_counts, zero(UInt32))
 
     fill!(ws.local_counts, zero(UInt32))
     fill!(ws.local_offsets, zero(UInt32))
     fill!(ws.global_offsets, zero(UInt32))
+    fill!(ws.rank_cursors, zero(UInt32))
     fill!(ws.local_ranks, zero(UInt32))
 
     return nothing

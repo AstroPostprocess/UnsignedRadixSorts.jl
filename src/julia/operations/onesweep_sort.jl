@@ -1,23 +1,30 @@
 
+function onesweep_sort!(codes :: Vector{UInt64}, :: Val{TileSize} = Val(4096)) where {TileSize}
+    return onesweep_sort!(codes, _ONESWEEP_WORKSPACE_64, Val(TileSize))
+end
 
-function onesweep_sort!(codes :: Vector{UInt64}, ws :: OnesweepWorkspace{UInt64, Vector{UInt64}}, :: Val{NWorkers} = Val(nthreads()), :: Val{TileSize} = Val(4096)) where {NWorkers, TileSize}
+
+function onesweep_sort!(codes :: Vector{UInt64}, ws :: OnesweepWorkspace{UInt64, Vector{UInt64}}, :: Val{TileSize} = Val(4096)) where {TileSize}
     # Nelems: number of elements that need to be sorted
     nelems = length(codes)
     # Number of data tiles
     ntiles = cld(nelems, TileSize)
+    # Number of workers/threads
+    nworkers = nthreads()
 
     # Initialize workspace
-    initialize_workspace!(ws, nelems, ntiles, Val(NWorkers), Val(TileSize))
+    initialize_workspace!(ws, nelems, ntiles, Val(nworkers), Val(TileSize))
+
+    # Before the first pass: global histogram for bucket
+    prepare_bucket_offsets!(ws, codes)
 
     # Onesweep passes, 8 bits per pass for UInt64
-    onesweep_pass!(codes,  ws, Val(NWorkers), Val(TileSize), Val(1))
-    onesweep_pass!(codes,  ws, Val(NWorkers), Val(TileSize), Val(2))
-    onesweep_pass!(codes,  ws, Val(NWorkers), Val(TileSize), Val(3))
-    onesweep_pass!(codes,  ws, Val(NWorkers), Val(TileSize), Val(4))
-    onesweep_pass!(codes,  ws, Val(NWorkers), Val(TileSize), Val(5))
-    onesweep_pass!(codes,  ws, Val(NWorkers), Val(TileSize), Val(6))
-    onesweep_pass!(codes,  ws, Val(NWorkers), Val(TileSize), Val(7))
-    onesweep_pass!(codes,  ws, Val(NWorkers), Val(TileSize), Val(8))
+    @nexprs 8 digit -> begin
+        reset_pass_workspace!(ws)
+        @threads :static for _ in 1:nworkers
+            onesweep_pass_kernel!(codes,  ws, Val(TileSize), Val(digit))
+        end
+    end
 
     return nothing
 end
