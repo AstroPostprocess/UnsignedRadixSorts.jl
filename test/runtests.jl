@@ -18,3 +18,4 @@ using Test
 using UnsignedIntegerRadixSort
 
 include("radix_sort_tests.jl")
+include("onesweep_sort_tests.jl")
