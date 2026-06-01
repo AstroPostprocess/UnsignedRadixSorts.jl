@@ -147,6 +147,18 @@ function onesweep_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspace{Ke
     return nothing
 end
 
+"""
+    onesweep_perm_pass_kernel!(codes::Vector{KeyT}, ws::OnesweepWorkspace{KeyT, Vector{KeyT}}, ::Val{TileSize}, ::Val{Pass}) where {KeyT <: Unsigned, TileSize, Pass}
+
+Execute one OneSweep 8-bit radix pass while scattering keys and their associated permutation indices between the active pass buffers.
+
+# Parameters
+
+- `codes`: Key buffer used as the source on odd passes and the destination on even passes.
+- `ws`: OneSweep workspace containing key buffers, permutation buffers, lookback table, counters, offsets, and per-worker scratch buffers.
+- `::Val{TileSize}`: Compile-time tile size used to partition the input into work tiles.
+- `::Val{Pass}`: Compile-time 1-based radix pass selector.
+"""
 function onesweep_perm_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspace{KeyT, Vector{KeyT}}, :: Val{TileSize}, :: Val{Pass}) where {KeyT <: Unsigned, TileSize, Pass}
     lookback     = ws.lookback
     tile_counter = ws.tile_counter
@@ -287,4 +299,3 @@ function onesweep_perm_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspa
     
     return nothing
 end
-

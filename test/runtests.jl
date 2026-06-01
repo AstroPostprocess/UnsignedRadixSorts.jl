@@ -6,16 +6,14 @@
 #             or: include("test/runtests.jl") from the REPL
 #
 #  Ordering convention
-#  1. Radix helpers                  (digit extraction, bucket indexing)
-#  2. Histogram / offsets / scatter  (core counting-sort building blocks)
-#  3. Single-pass behavior           (stable 8-bit radix passes)
-#  4. Full sort                      (public in-place radix_sort!)
-#  5. Sortperm / stability           (public radix_sortperm!)
+#  1. Bucket-offset preparation
+#  2. Full Onesweep sort
+#  3. Onesweep sortperm / stability
+#  4. Workspace reuse
 #
 # ========================================================================== #
 
 using Test
 using UnsignedIntegerRadixSort
 
-include("radix_sort_tests.jl")
 include("onesweep_sort_tests.jl")
