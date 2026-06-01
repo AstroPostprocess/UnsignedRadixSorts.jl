@@ -1,5 +1,6 @@
 module UnsignedRadixSorts
 
+using Adapt
 using Atomix
 using Base.Cartesian
 using Base.Threads

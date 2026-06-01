@@ -137,6 +137,63 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
             local_ranks
         )
     end
+
+    function OnesweepWorkspace(
+            dst :: KeyV,
+            perms :: NTuple{2, OffsetV},
+            tile_counter :: OffsetV,
+            lookback :: OffsetV,
+            bucket_offsets :: OffsetV,
+            prepass_counts :: OffsetV,
+            local_counts :: OffsetV,
+            local_offsets :: OffsetV,
+            global_offsets :: OffsetV,
+            rank_cursors :: OffsetV,
+            local_ranks :: OffsetV,
+        ) where {KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV <: AbstractVector{UInt32}}
+
+        return new{KeyT, KeyV, OffsetV}(
+            dst,
+            perms,
+            tile_counter,
+            lookback,
+            bucket_offsets,
+            prepass_counts,
+            local_counts,
+            local_offsets,
+            global_offsets,
+            rank_cursors,
+            local_ranks
+        )
+    end
+end
+
+function Adapt.adapt_structure(to, x :: OnesweepWorkspace)
+    dst = Adapt.adapt(to, x.dst)
+    perms = (Adapt.adapt(to, x.perms[1]), Adapt.adapt(to, x.perms[2]))
+    tile_counter = Adapt.adapt(to, x.tile_counter)
+    lookback = Adapt.adapt(to, x.lookback)
+    bucket_offsets = Adapt.adapt(to, x.bucket_offsets)
+    prepass_counts = Adapt.adapt(to, x.prepass_counts)
+    local_counts = Adapt.adapt(to, x.local_counts)
+    local_offsets = Adapt.adapt(to, x.local_offsets)
+    global_offsets = Adapt.adapt(to, x.global_offsets)
+    rank_cursors = Adapt.adapt(to, x.rank_cursors)
+    local_ranks = Adapt.adapt(to, x.local_ranks)
+
+    return OnesweepWorkspace(
+        dst,
+        perms,
+        tile_counter,
+        lookback,
+        bucket_offsets,
+        prepass_counts,
+        local_counts,
+        local_offsets,
+        global_offsets,
+        rank_cursors,
+        local_ranks,
+    )
 end
 
 """
