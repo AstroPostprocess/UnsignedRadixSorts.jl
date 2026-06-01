@@ -11,17 +11,17 @@ Workspace storage for Onesweep radix sort passes over unsigned integer keys.
 
 # Fields
 
-- `dst::KeyV`: Destination buffer for ping-pong key sorting.
-- `perms::NTuple{2, OffsetV}`: Ping-pong buffers for 1-based source permutation indices.
-- `tile_counter::OffsetV`: Length-one counter used to assign tiles during a pass.
-- `lookback::OffsetV`: Packed look-back table storing per-bucket tile prefix state and counts.
-- `bucket_offsets::OffsetV`: Global output start offsets for each bucket in each radix pass.
-- `prepass_counts::OffsetV`: Per-worker all-pass histograms used to build bucket offsets before Onesweep passes.
-- `local_counts::OffsetV`: Per-worker local bucket counts for the current tile.
-- `local_offsets::OffsetV`: Per-worker tile-local exclusive digit offsets.
-- `global_offsets::OffsetV`: Per-worker global output offsets for the current tile.
-- `rank_cursors::OffsetV`: Per-worker cursors used while assigning tile-local ranks.
-- `local_ranks::OffsetV`: Per-worker tile-local ranks for elements in the current tile.
+- `dst::KeyV`                   : Destination buffer for ping-pong key sorting.
+- `perms::NTuple{2, OffsetV}`   : Ping-pong buffers for 1-based source permutation indices.
+- `tile_counter::OffsetV`       : Length-one counter used to assign tiles during a pass.
+- `lookback::OffsetV`           : Packed look-back table storing per-bucket tile prefix state and counts.
+- `bucket_offsets::OffsetV`     : Global output start offsets for each bucket in each radix pass.
+- `prepass_counts::OffsetV`     : Per-worker all-pass histograms used to build bucket offsets before Onesweep passes.
+- `local_counts::OffsetV`       : Per-worker local bucket counts for the current tile.
+- `local_offsets::OffsetV`      : Per-worker tile-local exclusive digit offsets.
+- `global_offsets::OffsetV`     : Per-worker global output offsets for the current tile.
+- `rank_cursors::OffsetV`       : Per-worker cursors used while assigning tile-local ranks.
+- `local_ranks::OffsetV`        : Per-worker tile-local ranks for elements in the current tile.
 
 """
 struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV <: AbstractVector{UInt32}}

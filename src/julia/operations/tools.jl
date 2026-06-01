@@ -26,6 +26,11 @@ end
     return _bucket_block_base(block_id) + bucket
 end
 
+## Return the flattened index inside a 256-bucket block for a UInt32 bucket.
+@inline function _bucket_block_index(block_id :: Int, bucket :: UInt32)
+    return _bucket_block_base(block_id) + Int(bucket)
+end
+
 ## Return the flattened bucket-offset base for a runtime pass.
 @inline function _pass_bucket_base(pass :: Int)
     return _bucket_block_base(pass)
@@ -36,8 +41,18 @@ end
     return _bucket_block_index(pass, bucket)
 end
 
+## Return the flattened all-pass bucket-offset index for a UInt32 bucket.
+@inline function _bucket_offsets_index(pass :: Int, bucket :: UInt32)
+    return _bucket_block_index(pass, bucket)
+end
+
 ## Return the flattened per-worker prepass histogram index.
 @inline function _prepass_counts_index(worker_id :: Int, pass :: Int, bucket :: Int, npasses :: Int)
+    return 256 * npasses * (worker_id - 1) + _bucket_offsets_index(pass, bucket)
+end
+
+## Return the flattened per-worker prepass histogram index for a UInt32 bucket.
+@inline function _prepass_counts_index(worker_id :: Int, pass :: Int, bucket :: UInt32, npasses :: Int)
     return 256 * npasses * (worker_id - 1) + _bucket_offsets_index(pass, bucket)
 end
 
@@ -48,6 +63,11 @@ end
 
 ## Return the flattened per-worker bucket scratch index.
 @inline function _worker_bucket_index(worker_id :: Int, bucket :: Int)
+    return _bucket_block_index(worker_id, bucket)
+end
+
+## Return the flattened per-worker bucket scratch index for a UInt32 bucket.
+@inline function _worker_bucket_index(worker_id :: Int, bucket :: UInt32)
     return _bucket_block_index(worker_id, bucket)
 end
 

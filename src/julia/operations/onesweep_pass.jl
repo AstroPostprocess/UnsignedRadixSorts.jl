@@ -35,7 +35,7 @@ function onesweep_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspace{Ke
     local_ranks    = ws.local_ranks
 
     worker_id = _worker_id()
-    ranks_base = TileSize * (worker_id - 1)
+    tile_base = TileSize * (worker_id - 1)
 
     while true
         # First CUB-like step:
@@ -88,10 +88,11 @@ function onesweep_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspace{Ke
         end
 
         @inbounds for i in rangemin:rangemax
+            rank_idx = tile_base + i - rangemin + 1
             bucket = _radix_bucket(src[i], Pass)
             idx_wb = _worker_bucket_index(worker_id, bucket)
             rank = rank_cursors[idx_wb]
-            local_ranks[ranks_base + i - rangemin + 1] = rank
+            local_ranks[rank_idx] = rank
             rank_cursors[idx_wb] = rank + one(UInt32)
         end
 
@@ -135,9 +136,9 @@ function onesweep_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspace{Ke
         # Seventh CUB-like step:
         # scatter this tile using the bucket base and the 0-based tile-wide rank.
         @inbounds for i in rangemin:rangemax
+            rank_idx = tile_base + i - rangemin + 1
             bucket = _radix_bucket(src[i], Pass)
             idx_wb = _worker_bucket_index(worker_id, bucket)
-            rank_idx = ranks_base + i - rangemin + 1
             scatter_idx = global_offsets[idx_wb] + local_ranks[rank_idx]
             dst[Int(scatter_idx)] = src[i]
         end
@@ -187,7 +188,7 @@ function onesweep_perm_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspa
     local_ranks    = ws.local_ranks
 
     worker_id = _worker_id()
-    ranks_base = TileSize * (worker_id - 1)
+    tile_base = TileSize * (worker_id - 1)
 
     while true
         # First CUB-like step:
@@ -240,10 +241,11 @@ function onesweep_perm_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspa
         end
 
         @inbounds for i in rangemin:rangemax
+            rank_idx = tile_base + i - rangemin + 1
             bucket = _radix_bucket(src[i], Pass)
             idx_wb = _worker_bucket_index(worker_id, bucket)
             rank = rank_cursors[idx_wb]
-            local_ranks[ranks_base + i - rangemin + 1] = rank
+            local_ranks[rank_idx] = rank
             rank_cursors[idx_wb] = rank + one(UInt32)
         end
 
@@ -287,9 +289,9 @@ function onesweep_perm_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspa
         # Seventh CUB-like step:
         # scatter this tile using the bucket base and the 0-based tile-wide rank.
         @inbounds for i in rangemin:rangemax
+            rank_idx = tile_base + i - rangemin + 1
             bucket = _radix_bucket(src[i], Pass)
             idx_wb = _worker_bucket_index(worker_id, bucket)
-            rank_idx = ranks_base + i - rangemin + 1
             scatter_idx = global_offsets[idx_wb] + local_ranks[rank_idx]
             dst[Int(scatter_idx)] = src[i]
             perm_dst[Int(scatter_idx)] = perm_src[i]
