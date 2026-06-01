@@ -5,8 +5,18 @@ authors = ["Wei-Shan Su <weishansu011017@gmail.com>"]
 
 [deps]
 Atomix = "a9b6321e-bd34-4604-b9c9-b65b8de01458"
+Reexport = "189a3867-3050-52da-a836-e630ba90ab69"
+
+[weakdeps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
+
+[extensions]
+CUDAExt = "CUDA"
+MetalExt = "Metal"
 
 [compat]
+Reexport = "1.2.2"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
