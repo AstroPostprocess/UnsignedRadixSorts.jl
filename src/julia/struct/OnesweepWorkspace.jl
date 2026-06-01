@@ -264,7 +264,7 @@ Fill a permutation buffer with 1-based Julia source indices.
 - `perm`: Permutation buffer to initialize.
 - `nelems`: Number of indices to write.
 """
-function initialize_perm_indices!(perm :: Vector{UInt32}, nelems :: Int)
+@inline function initialize_perm_indices!(perm :: Vector{UInt32}, nelems :: Int)
     @inbounds for i in 1:nelems
         perm[i] = UInt32(i)
     end

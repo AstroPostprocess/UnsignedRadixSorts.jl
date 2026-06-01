@@ -23,7 +23,6 @@ for (KeyT, NPasses) in (
         function prepare_bucket_offsets!(ws :: OnesweepWorkspace{$KeyT, Vector{$KeyT}}, codes :: Vector{$KeyT})
             nworkers = nthreads()
             nelems = length(codes)
-            npasses = _npasses(ws)
 
             # Initialization
             fill!(ws.prepass_counts, zero(UInt32))
@@ -40,7 +39,7 @@ for (KeyT, NPasses) in (
 
                     @nexprs $NPasses pass -> begin
                         bucket = _radix_bucket(x, pass)
-                        idx = _prepass_counts_index(worker_id, pass, bucket, npasses)
+                        idx = _prepass_counts_index(worker_id, pass, bucket, $NPasses)
                         ws.prepass_counts[idx] += one(UInt32)
                     end
                 end
@@ -48,14 +47,14 @@ for (KeyT, NPasses) in (
 
             # launch 2 equivalent:
             # reduce worker counts + counts -> 1-based exclusive starts
-            @threads :static for pass in 1:npasses
+            @threads :static for pass in 1:$NPasses
                 running = one(UInt32)
 
                 @inbounds for bucket in 1:256
                     count = zero(UInt32)
 
                     for worker_id in 1:nworkers
-                        idx = _prepass_counts_index(worker_id, pass, bucket, npasses)
+                        idx = _prepass_counts_index(worker_id, pass, bucket, $NPasses)
                         count += ws.prepass_counts[idx]
                     end
 
