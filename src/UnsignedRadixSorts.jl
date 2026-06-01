@@ -1,4 +1,4 @@
-module UnsignedIntegerRadixSort
+module UnsignedRadixSorts
 
 using Atomix
 using Base.Cartesian
@@ -17,7 +17,7 @@ include(joinpath("julia", "operations", "onesweep_sort.jl"))
 version() = pkgversion(@__MODULE__)
 
 function about()
-    @info "UnsignedIntegerRadixSort Module\n  Version: $(version())\n  Made by Wei-Shan Su, June 2026"
+    @info "UnsignedRadixSorts Module\n  Version: $(version())\n  Made by Wei-Shan Su, June 2026"
     return nothing
 end
 

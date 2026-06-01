@@ -1,2 +1,3 @@
-# Templete.jl
-A template repository for Julia packages
+# UnsignedRadixSorts.jl
+
+Threaded radix sorting for unsigned integer keys in Julia.

@@ -1,5 +1,5 @@
 # ========================================================================== #
-#  UnsignedIntegerRadixSort.jl - Test Suite Entry Point
+#  UnsignedRadixSorts.jl - Test Suite Entry Point
 # ========================================================================== #
 #
 #  Run with:  julia --project -e "using Pkg; Pkg.test()"
@@ -14,6 +14,6 @@
 # ========================================================================== #
 
 using Test
-using UnsignedIntegerRadixSort
+using UnsignedRadixSorts
 
 include("onesweep_sort_tests.jl")

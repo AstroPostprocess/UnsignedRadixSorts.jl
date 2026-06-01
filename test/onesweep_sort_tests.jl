@@ -22,9 +22,9 @@
 # ========================================================================== #
 
 using Test
-using UnsignedIntegerRadixSort
+using UnsignedRadixSorts
 
-const ONESWEEP_UIRS = UnsignedIntegerRadixSort
+const ONESWEEP_URS = UnsignedRadixSorts
 const ONESWEEP_UNSIGNED_TYPES = (UInt8, UInt16, UInt32, UInt64, UInt128)
 
 function onesweep_digit_reference(x::T, pass::Int) where {T<:Unsigned}
@@ -170,7 +170,7 @@ function assert_onesweep_bucket_offsets(codes::Vector{T}, tile_size::Int=7) wher
             running += UInt32(counts[bucket])
         end
 
-        range = ONESWEEP_UIRS._bucket_offsets_index(pass, 1):ONESWEEP_UIRS._bucket_offsets_index(pass, 256)
+        range = ONESWEEP_URS._bucket_offsets_index(pass, 1):ONESWEEP_URS._bucket_offsets_index(pass, 256)
         @test ws.bucket_offsets[range] == expected
         @test running == UInt32(length(codes) + 1)
     end
