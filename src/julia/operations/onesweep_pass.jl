@@ -1,6 +1,6 @@
 
 """
-    onesweep_pass_kernel!(codes::Vector{KeyT}, ws::OnesweepWorkspace{KeyT, Vector{KeyT}}, ::Val{TileSize}, ::Val{Pass}) where {KeyT <: Unsigned, TileSize, Pass}
+    onesweep_pass_kernel!(codes::KeyV, ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, ::Val{TileSize}, ::Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, TileSize, Pass}
 
 Execute one OneSweep 8-bit radix pass by claiming tiles, computing local ranks, resolving global bucket offsets, and scattering keys between the active pass buffers.
 
@@ -11,7 +11,7 @@ Execute one OneSweep 8-bit radix pass by claiming tiles, computing local ranks, 
 - `::Val{TileSize}`: Compile-time tile size used to partition the input into work tiles.
 - `::Val{Pass}`: Compile-time 1-based radix pass selector.
 """
-function onesweep_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspace{KeyT, Vector{KeyT}}, :: Val{TileSize}, :: Val{Pass}) where {KeyT <: Unsigned, TileSize, Pass}
+function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, TileSize, Pass}
     lookback     = ws.lookback
     tile_counter = ws.tile_counter
 
@@ -149,7 +149,7 @@ function onesweep_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspace{Ke
 end
 
 """
-    onesweep_perm_pass_kernel!(codes::Vector{KeyT}, ws::OnesweepWorkspace{KeyT, Vector{KeyT}}, ::Val{TileSize}, ::Val{Pass}) where {KeyT <: Unsigned, TileSize, Pass}
+    onesweep_perm_pass_kernel!(codes::KeyV, ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, ::Val{TileSize}, ::Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, TileSize, Pass}
 
 Execute one OneSweep 8-bit radix pass while scattering keys and their associated permutation indices between the active pass buffers.
 
@@ -160,7 +160,7 @@ Execute one OneSweep 8-bit radix pass while scattering keys and their associated
 - `::Val{TileSize}`: Compile-time tile size used to partition the input into work tiles.
 - `::Val{Pass}`: Compile-time 1-based radix pass selector.
 """
-function onesweep_perm_pass_kernel!(codes :: Vector{KeyT}, ws :: OnesweepWorkspace{KeyT, Vector{KeyT}}, :: Val{TileSize}, :: Val{Pass}) where {KeyT <: Unsigned, TileSize, Pass}
+function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, TileSize, Pass}
     lookback     = ws.lookback
     tile_counter = ws.tile_counter
 

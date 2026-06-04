@@ -1,6 +1,6 @@
 
 """
-    prepare_bucket_offsets!(ws::OnesweepWorkspace{KeyT, Vector{KeyT}}, codes::Vector{KeyT}) where {KeyT <: Unsigned}
+    prepare_bucket_offsets!(ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, codes::KeyV) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}}
 
 Compute all-pass radix histograms for `codes` and write 1-based global bucket start offsets into `ws`.
 
@@ -20,7 +20,7 @@ for (KeyT, NPasses) in (
         (UInt128, 16),
     )
     @eval begin
-        function prepare_bucket_offsets!(ws :: OnesweepWorkspace{$KeyT, Vector{$KeyT}}, codes :: Vector{$KeyT})
+        function prepare_bucket_offsets!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, codes :: KeyV) where {KeyV <: Vector{$KeyT}, OffsetV <: Vector{UInt32}}
             nworkers = nthreads()
             nelems = length(codes)
 

@@ -272,7 +272,7 @@ Fill a permutation buffer with 1-based Julia source indices.
 end
 
 """
-    initialize_perm_workspace!(ws::OnesweepWorkspace{KeyT, KeyV}, nelems::Int, ntiles::Int, ::Val{NWorkers}, ::Val{TileSize}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, NWorkers, TileSize}
+    initialize_perm_workspace!(ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems::Int, ntiles::Int, ::Val{NWorkers}, ::Val{TileSize}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, NWorkers, TileSize}
 
 Resize and clear the Onesweep workspace for permutation sorting.
 
@@ -284,7 +284,7 @@ Resize and clear the Onesweep workspace for permutation sorting.
 - `::Val{NWorkers}`: Compile-time number of workers used for per-worker scratch storage.
 - `::Val{TileSize}`: Compile-time tile size used for local rank storage.
 """
-function initialize_perm_workspace!(ws :: OnesweepWorkspace{KeyT, KeyV}, nelems :: Int, ntiles :: Int, :: Val{NWorkers}, :: Val{TileSize}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, NWorkers, TileSize}
+function initialize_perm_workspace!(ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems :: Int, ntiles :: Int, :: Val{NWorkers}, :: Val{TileSize}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, NWorkers, TileSize}
     # Initialize the common key-sorting workspace.
     initialize_workspace!(ws, nelems, ntiles, Val(NWorkers), Val(TileSize))
 

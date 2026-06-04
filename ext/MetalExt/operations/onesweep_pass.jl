@@ -19,12 +19,7 @@
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function onesweep_pass_kernel!(
-                codes :: KeyV,
-                ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV},
-                :: Val{TileSize},
-                :: Val{Pass},
-            ) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt32}, TileSize, Pass}
+        @inline function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt32}, TileSize, Pass}
 
             lookback = ws.lookback
             tile_counter = ws.tile_counter
@@ -219,12 +214,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             return nothing
         end
 
-        @inline function onesweep_perm_pass_kernel!(
-                codes :: KeyV,
-                ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV},
-                :: Val{TileSize},
-                :: Val{Pass},
-            ) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt32}, TileSize, Pass}
+        @inline function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt32}, TileSize, Pass}
 
             lookback = ws.lookback
             tile_counter = ws.tile_counter
