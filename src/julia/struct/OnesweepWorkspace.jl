@@ -1,5 +1,5 @@
 """
-    OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV <: AbstractVector{UInt32}}
+    OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV <: AbstractVector{UInt64}}
 
 Workspace storage for Onesweep radix sort passes over unsigned integer keys.
 
@@ -7,7 +7,7 @@ Workspace storage for Onesweep radix sort passes over unsigned integer keys.
 
 - `KeyT`: Unsigned integer key type sorted by the workspace.
 - `KeyV`: Abstract vector type used for key storage.
-- `OffsetV`: Abstract vector type used for UInt32 counters, offsets, ranks, and permutation buffers.
+- `OffsetV`: Abstract vector type used for UInt64 counters, offsets, ranks, and permutation buffers.
 
 # Fields
 
@@ -24,7 +24,7 @@ Workspace storage for Onesweep radix sort passes over unsigned integer keys.
 - `local_ranks::OffsetV`        : Per-worker tile-local ranks for elements in the current tile.
 
 """
-struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV <: AbstractVector{UInt32}}
+struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV <: AbstractVector{UInt64}}
     # Global storages
     ## Workspace for data
     dst :: KeyV
@@ -44,7 +44,7 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
     ##   01xxxxxx...xxxx            => PARTIAL local count
     ##   10xxxxxx...xxxx            => GLOBAL prefix count
     ##
-    ## The lower 30 bits store the count.
+    ## The lower 62 bits store the count.
     ## Length = 256 * ntiles for an 8-bit radix pass.
     lookback :: OffsetV
 
@@ -103,22 +103,22 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
         # Global workspaces
         dst = KeyV(undef, 0)
 
-        tile_counter = similar(dst, UInt32, 0)
-        lookback = similar(dst, UInt32, 0)
+        tile_counter = similar(dst, UInt64, 0)
+        lookback = similar(dst, UInt64, 0)
 
-        bucket_offsets = similar(dst, UInt32, 0)
+        bucket_offsets = similar(dst, UInt64, 0)
 
-        prepass_counts = similar(dst, UInt32, 0)
+        prepass_counts = similar(dst, UInt64, 0)
 
-        perm_1 = similar(dst, UInt32, 0)
-        perm_2 = similar(dst, UInt32, 0)
+        perm_1 = similar(dst, UInt64, 0)
+        perm_2 = similar(dst, UInt64, 0)
 
         # Temporary workspaces
-        local_counts   = similar(dst, UInt32, 0)
-        local_offsets  = similar(dst, UInt32, 0)
-        global_offsets = similar(dst, UInt32, 0)
-        rank_cursors   = similar(dst, UInt32, 0)
-        local_ranks    = similar(dst, UInt32, 0)
+        local_counts   = similar(dst, UInt64, 0)
+        local_offsets  = similar(dst, UInt64, 0)
+        global_offsets = similar(dst, UInt64, 0)
+        rank_cursors   = similar(dst, UInt64, 0)
+        local_ranks    = similar(dst, UInt64, 0)
 
         # Type stablizer
         OffsetV  = typeof(bucket_offsets)
@@ -150,7 +150,7 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
             global_offsets :: OffsetV,
             rank_cursors :: OffsetV,
             local_ranks :: OffsetV,
-        ) where {KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV <: AbstractVector{UInt32}}
+        ) where {KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV <: AbstractVector{UInt64}}
 
         return new{KeyT, KeyV, OffsetV}(
             dst,
@@ -240,22 +240,22 @@ function initialize_workspace!(ws :: OnesweepWorkspace{KeyT}, nelems :: Int, nti
     resize!(ws.rank_cursors,   256 * NWorkers)
     resize!(ws.local_ranks,   TileSize * NWorkers)
 
-    fill!(ws.tile_counter, zero(UInt32))
-    fill!(ws.lookback, zero(UInt32))
-    fill!(ws.bucket_offsets, zero(UInt32))
-    fill!(ws.prepass_counts, zero(UInt32))
+    fill!(ws.tile_counter, zero(UInt64))
+    fill!(ws.lookback, zero(UInt64))
+    fill!(ws.bucket_offsets, zero(UInt64))
+    fill!(ws.prepass_counts, zero(UInt64))
 
-    fill!(ws.local_counts, zero(UInt32))
-    fill!(ws.local_offsets, zero(UInt32))
-    fill!(ws.global_offsets, zero(UInt32))
-    fill!(ws.rank_cursors, zero(UInt32))
-    fill!(ws.local_ranks, zero(UInt32))
+    fill!(ws.local_counts, zero(UInt64))
+    fill!(ws.local_offsets, zero(UInt64))
+    fill!(ws.global_offsets, zero(UInt64))
+    fill!(ws.rank_cursors, zero(UInt64))
+    fill!(ws.local_ranks, zero(UInt64))
 
     return nothing
 end
 
 """
-    initialize_perm_indices!(perm::Vector{UInt32}, nelems::Int)
+    initialize_perm_indices!(perm::Vector{UInt64}, nelems::Int)
 
 Fill a permutation buffer with 1-based Julia source indices.
 
@@ -264,15 +264,15 @@ Fill a permutation buffer with 1-based Julia source indices.
 - `perm`: Permutation buffer to initialize.
 - `nelems`: Number of indices to write.
 """
-@inline function initialize_perm_indices!(perm :: Vector{UInt32}, nelems :: Int)
+@inline function initialize_perm_indices!(perm :: Vector{UInt64}, nelems :: Int)
     @inbounds for i in 1:nelems
-        perm[i] = UInt32(i)
+        perm[i] = UInt64(i)
     end
     return nothing
 end
 
 """
-    initialize_perm_workspace!(ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems::Int, ntiles::Int, ::Val{NWorkers}, ::Val{TileSize}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, NWorkers, TileSize}
+    initialize_perm_workspace!(ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems::Int, ntiles::Int, ::Val{NWorkers}, ::Val{TileSize}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt64}, NWorkers, TileSize}
 
 Resize and clear the Onesweep workspace for permutation sorting.
 
@@ -284,7 +284,7 @@ Resize and clear the Onesweep workspace for permutation sorting.
 - `::Val{NWorkers}`: Compile-time number of workers used for per-worker scratch storage.
 - `::Val{TileSize}`: Compile-time tile size used for local rank storage.
 """
-function initialize_perm_workspace!(ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems :: Int, ntiles :: Int, :: Val{NWorkers}, :: Val{TileSize}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, NWorkers, TileSize}
+function initialize_perm_workspace!(ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems :: Int, ntiles :: Int, :: Val{NWorkers}, :: Val{TileSize}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt64}, NWorkers, TileSize}
     # Initialize the common key-sorting workspace.
     initialize_workspace!(ws, nelems, ntiles, Val(NWorkers), Val(TileSize))
 
@@ -310,7 +310,7 @@ Clear the per-pass tile counter and look-back table.
 - `ws`: Workspace whose per-pass buffers are reset.
 """
 function reset_pass_workspace!(ws :: OnesweepWorkspace)
-    fill!(ws.tile_counter, zero(UInt32))
-    fill!(ws.lookback, zero(UInt32))
+    fill!(ws.tile_counter, zero(UInt64))
+    fill!(ws.lookback, zero(UInt64))
     return nothing
 end

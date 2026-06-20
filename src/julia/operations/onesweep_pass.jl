@@ -1,6 +1,6 @@
 
 """
-    onesweep_pass_kernel!(codes::KeyV, ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, ::Val{TileSize}, ::Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, TileSize, Pass}
+    onesweep_pass_kernel!(codes::KeyV, ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, ::Val{TileSize}, ::Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt64}, TileSize, Pass}
 
 Execute one OneSweep 8-bit radix pass by claiming tiles, computing local ranks, resolving global bucket offsets, and scattering keys between the active pass buffers.
 
@@ -11,7 +11,7 @@ Execute one OneSweep 8-bit radix pass by claiming tiles, computing local ranks, 
 - `::Val{TileSize}`: Compile-time tile size used to partition the input into work tiles.
 - `::Val{Pass}`: Compile-time 1-based radix pass selector.
 """
-function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, TileSize, Pass}
+function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt64}, TileSize, Pass}
     lookback     = ws.lookback
     tile_counter = ws.tile_counter
 
@@ -40,8 +40,8 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
     while true
         # First CUB-like step:
         # dynamically claim tile ids from the global counter.
-        new = Atomix.@atomic tile_counter[1] += one(UInt32)
-        tile_id = Int(new - UInt32(1))
+        new = Atomix.@atomic tile_counter[1] += one(UInt64)
+        tile_id = Int(new - UInt64(1))
         tile_id < ntiles || break
 
         # Convert the 0-based tile id to a 1-based Julia range.
@@ -52,13 +52,13 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         # compute this tile's local radix histogram.
         @inbounds for b in 1:256
             idx = _worker_bucket_index(worker_id, b)
-            local_counts[idx] = zero(UInt32)
+            local_counts[idx] = zero(UInt64)
         end
 
         @inbounds for i in rangemin:rangemax
             bucket = _radix_bucket(src[i], Pass)
             idx = _worker_bucket_index(worker_id, bucket)
-            local_counts[idx] += one(UInt32)
+            local_counts[idx] += one(UInt64)
         end
 
         # Third CUB-like step:
@@ -72,7 +72,7 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
 
         # Fourth CUB-like step:
         # compute 0-based tile-local exclusive digit offsets.
-        running = zero(UInt32)
+        running = zero(UInt64)
 
         @inbounds for bucket in 1:256
             idx_wb = _worker_bucket_index(worker_id, bucket)
@@ -93,13 +93,13 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
             idx_wb = _worker_bucket_index(worker_id, bucket)
             rank = rank_cursors[idx_wb]
             local_ranks[rank_idx] = rank
-            rank_cursors[idx_wb] = rank + one(UInt32)
+            rank_cursors[idx_wb] = rank + one(UInt64)
         end
 
         # Sixth CUB-like step:
         # look back over previous tiles and compute per-bucket global scatter offsets.
         @inbounds for bucket in 1:256
-            previous = zero(UInt32)
+            previous = zero(UInt64)
 
             prev_tile = tile_id - 1
             while prev_tile >= 0
@@ -108,7 +108,7 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
                 entry = Atomix.@atomic :acquire lookback[idx]
 
                 # Wait until the previous tile has published something.
-                while entry == zero(UInt32)
+                while entry == zero(UInt64)
                     entry = Atomix.@atomic :acquire lookback[idx]
                 end
 
@@ -149,7 +149,7 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
 end
 
 """
-    onesweep_perm_pass_kernel!(codes::KeyV, ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, ::Val{TileSize}, ::Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, TileSize, Pass}
+    onesweep_perm_pass_kernel!(codes::KeyV, ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, ::Val{TileSize}, ::Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt64}, TileSize, Pass}
 
 Execute one OneSweep 8-bit radix pass while scattering keys and their associated permutation indices between the active pass buffers.
 
@@ -160,7 +160,7 @@ Execute one OneSweep 8-bit radix pass while scattering keys and their associated
 - `::Val{TileSize}`: Compile-time tile size used to partition the input into work tiles.
 - `::Val{Pass}`: Compile-time 1-based radix pass selector.
 """
-function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, TileSize, Pass}
+function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt64}, TileSize, Pass}
     lookback     = ws.lookback
     tile_counter = ws.tile_counter
 
@@ -193,8 +193,8 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
     while true
         # First CUB-like step:
         # dynamically claim tile ids from the global counter.
-        new = Atomix.@atomic tile_counter[1] += one(UInt32)
-        tile_id = Int(new - UInt32(1))
+        new = Atomix.@atomic tile_counter[1] += one(UInt64)
+        tile_id = Int(new - UInt64(1))
         tile_id < ntiles || break
 
         # Convert the 0-based tile id to a 1-based Julia range.
@@ -205,13 +205,13 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         # compute this tile's local radix histogram.
         @inbounds for b in 1:256
             idx = _worker_bucket_index(worker_id, b)
-            local_counts[idx] = zero(UInt32)
+            local_counts[idx] = zero(UInt64)
         end
 
         @inbounds for i in rangemin:rangemax
             bucket = _radix_bucket(src[i], Pass)
             idx = _worker_bucket_index(worker_id, bucket)
-            local_counts[idx] += one(UInt32)
+            local_counts[idx] += one(UInt64)
         end
 
         # Third CUB-like step:
@@ -225,7 +225,7 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
 
         # Fourth CUB-like step:
         # compute 0-based tile-local exclusive digit offsets.
-        running = zero(UInt32)
+        running = zero(UInt64)
 
         @inbounds for bucket in 1:256
             idx_wb = _worker_bucket_index(worker_id, bucket)
@@ -246,13 +246,13 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
             idx_wb = _worker_bucket_index(worker_id, bucket)
             rank = rank_cursors[idx_wb]
             local_ranks[rank_idx] = rank
-            rank_cursors[idx_wb] = rank + one(UInt32)
+            rank_cursors[idx_wb] = rank + one(UInt64)
         end
 
         # Sixth CUB-like step:
         # look back over previous tiles and compute per-bucket global scatter offsets.
         @inbounds for bucket in 1:256
-            previous = zero(UInt32)
+            previous = zero(UInt64)
 
             prev_tile = tile_id - 1
             while prev_tile >= 0
@@ -261,7 +261,7 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
                 entry = Atomix.@atomic :acquire lookback[idx]
 
                 # Wait until the previous tile has published something.
-                while entry == zero(UInt32)
+                while entry == zero(UInt64)
                     entry = Atomix.@atomic :acquire lookback[idx]
                 end
 

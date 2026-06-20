@@ -131,7 +131,7 @@ function run_onesweep_sortperm_case(original::Vector{T}, tile_size::Int=4096) wh
     @test codes == sort(collect(original))
     @test collect(order) == expected_order
     @test codes == original[collect(Int, order)]
-    @test eltype(order) == UInt32
+    @test eltype(order) == UInt64
 end
 
 function run_onesweep_sortperm_workspace_case(original::Vector{T}, tile_size::Int=4096) where {T<:Unsigned}
@@ -143,7 +143,7 @@ function run_onesweep_sortperm_workspace_case(original::Vector{T}, tile_size::In
     @test codes == sort(collect(original))
     @test collect(order) == expected_order
     @test codes == original[collect(Int, order)]
-    @test eltype(order) == UInt32
+    @test eltype(order) == UInt64
     @test order === (isodd(sizeof(T)) ? ws.perms[2] : ws.perms[1])
     @test length(ws.perms[1]) == length(original)
     @test length(ws.perms[2]) == length(original)
@@ -162,17 +162,17 @@ function assert_onesweep_bucket_offsets(codes::Vector{T}, tile_size::Int=7) wher
 
     for pass in 1:sizeof(T)
         counts = onesweep_histogram_reference(codes, pass)
-        running = UInt32(1)
-        expected = Vector{UInt32}(undef, 256)
+        running = UInt64(1)
+        expected = Vector{UInt64}(undef, 256)
 
         for bucket in 1:256
             expected[bucket] = running
-            running += UInt32(counts[bucket])
+            running += UInt64(counts[bucket])
         end
 
         range = ONESWEEP_URS._bucket_offsets_index(pass, 1):ONESWEEP_URS._bucket_offsets_index(pass, 256)
         @test ws.bucket_offsets[range] == expected
-        @test running == UInt32(length(codes) + 1)
+        @test running == UInt64(length(codes) + 1)
     end
 end
 

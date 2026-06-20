@@ -1,6 +1,6 @@
 
 """
-    prepare_bucket_offsets!(ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, codes::KeyV) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}}
+    prepare_bucket_offsets!(ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, codes::KeyV) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt64}}
 
 Compute all-pass radix histograms for `codes` and write 1-based global bucket start offsets into `ws`.
 
@@ -20,13 +20,13 @@ for (KeyT, NPasses) in (
         (UInt128, 16),
     )
     @eval begin
-        function prepare_bucket_offsets!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, codes :: KeyV) where {KeyV <: Vector{$KeyT}, OffsetV <: Vector{UInt32}}
+        function prepare_bucket_offsets!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, codes :: KeyV) where {KeyV <: Vector{$KeyT}, OffsetV <: Vector{UInt64}}
             nworkers = nthreads()
             nelems = length(codes)
 
             # Initialization
-            fill!(ws.prepass_counts, zero(UInt32))
-            fill!(ws.bucket_offsets, zero(UInt32))
+            fill!(ws.prepass_counts, zero(UInt64))
+            fill!(ws.bucket_offsets, zero(UInt64))
 
             # launch 1 equivalent:
             # all-pass histogram, per worker private counts
@@ -40,7 +40,7 @@ for (KeyT, NPasses) in (
                     @nexprs $NPasses pass -> begin
                         bucket = _radix_bucket(x, pass)
                         idx = _prepass_counts_index(worker_id, pass, bucket, $NPasses)
-                        ws.prepass_counts[idx] += one(UInt32)
+                        ws.prepass_counts[idx] += one(UInt64)
                     end
                 end
             end
@@ -48,10 +48,10 @@ for (KeyT, NPasses) in (
             # launch 2 equivalent:
             # reduce worker counts + counts -> 1-based exclusive starts
             @threads :static for pass in 1:$NPasses
-                running = one(UInt32)
+                running = one(UInt64)
 
                 @inbounds for bucket in 1:256
-                    count = zero(UInt32)
+                    count = zero(UInt64)
 
                     for worker_id in 1:nworkers
                         idx = _prepass_counts_index(worker_id, pass, bucket, $NPasses)
