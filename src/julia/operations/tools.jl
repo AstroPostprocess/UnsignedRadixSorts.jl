@@ -26,8 +26,8 @@ end
     return _bucket_block_base(block_id) + bucket
 end
 
-## Return the flattened index inside a 256-bucket block for a UInt64 bucket.
-@inline function _bucket_block_index(block_id :: Int, bucket :: UInt64)
+## Return the flattened index inside a 256-bucket block for a UInt32 bucket.
+@inline function _bucket_block_index(block_id :: Int, bucket :: UInt32)
     return _bucket_block_base(block_id) + Int(bucket)
 end
 
@@ -41,8 +41,8 @@ end
     return _bucket_block_index(pass, bucket)
 end
 
-## Return the flattened all-pass bucket-offset index for a UInt64 bucket.
-@inline function _bucket_offsets_index(pass :: Int, bucket :: UInt64)
+## Return the flattened all-pass bucket-offset index for a UInt32 bucket.
+@inline function _bucket_offsets_index(pass :: Int, bucket :: UInt32)
     return _bucket_block_index(pass, bucket)
 end
 
@@ -51,8 +51,8 @@ end
     return 256 * npasses * (worker_id - 1) + _bucket_offsets_index(pass, bucket)
 end
 
-## Return the flattened per-worker prepass histogram index for a UInt64 bucket.
-@inline function _prepass_counts_index(worker_id :: Int, pass :: Int, bucket :: UInt64, npasses :: Int)
+## Return the flattened per-worker prepass histogram index for a UInt32 bucket.
+@inline function _prepass_counts_index(worker_id :: Int, pass :: Int, bucket :: UInt32, npasses :: Int)
     return 256 * npasses * (worker_id - 1) + _bucket_offsets_index(pass, bucket)
 end
 
@@ -66,8 +66,8 @@ end
     return _bucket_block_index(worker_id, bucket)
 end
 
-## Return the flattened per-worker bucket scratch index for a UInt64 bucket.
-@inline function _worker_bucket_index(worker_id :: Int, bucket :: UInt64)
+## Return the flattened per-worker bucket scratch index for a UInt32 bucket.
+@inline function _worker_bucket_index(worker_id :: Int, bucket :: UInt32)
     return _bucket_block_index(worker_id, bucket)
 end
 
@@ -81,26 +81,26 @@ end
 ################### Lookback entry encoding ###################
 
 ## Pack a local count as a partial lookback entry.
-@inline function _partial_entry(count :: UInt64)
-    return count | (UInt64(1) << 62)
+@inline function _partial_entry(count :: UInt32)
+    return count | (UInt32(1) << 30)
 end
 
 ## Pack a prefix count as a global lookback entry.
-@inline function _global_entry(count :: UInt64)
-    return count | (UInt64(2) << 62)
+@inline function _global_entry(count :: UInt32)
+    return count | (UInt32(2) << 30)
 end
 
 ## Extract the count payload from a lookback entry.
-@inline function _entry_count(entry :: UInt64)
-    return entry & ((UInt64(1) << 62) - UInt64(1))
+@inline function _entry_count(entry :: UInt32)
+    return entry & ((UInt32(1) << 30) - UInt32(1))
 end
 
 ## Return whether a lookback entry is partial.
-@inline function _is_partial_entry(entry::UInt64)
-    return (entry >> 62) == UInt64(1)
+@inline function _is_partial_entry(entry::UInt32)
+    return (entry >> 30) == UInt32(1)
 end
 
 ## Return whether a lookback entry is global.
-@inline function _is_global_entry(entry::UInt64)
-    return (entry >> 62) == UInt64(2)
+@inline function _is_global_entry(entry::UInt32)
+    return (entry >> 30) == UInt32(2)
 end

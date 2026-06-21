@@ -1,5 +1,5 @@
 """
-    onesweep_sort!(codes::KeyV, ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, ::Val{TileSize}=Val(4096)) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt64}, TileSize}
+    onesweep_sort!(codes::KeyV, ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, ::Val{TileSize}=Val(4096)) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, TileSize}
     onesweep_sort!(codes::KeyV, ::Val{TileSize}=Val(4096)) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, TileSize}
 
 Sort `codes` in-place in ascending order using the threaded OneSweep 8-bit LSD radix sorter.
@@ -13,7 +13,7 @@ Sort `codes` in-place in ascending order using the threaded OneSweep 8-bit LSD r
 function onesweep_sort! end
 
 """
-    onesweep_sortperm!(codes::KeyV, ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, ::Val{TileSize}=Val(4096)) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt64}, TileSize}
+    onesweep_sortperm!(codes::KeyV, ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, ::Val{TileSize}=Val(4096)) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, TileSize}
     onesweep_sortperm!(codes::KeyV, ::Val{TileSize}=Val(4096)) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, TileSize}
 
 Sort `codes` in-place in ascending order using the threaded OneSweep 8-bit LSD radix sorter, and return the corresponding permutation indices.
@@ -38,7 +38,7 @@ for (KeyT, Workspace, NPasses) in (
         (UInt128, :_ONESWEEP_WORKSPACE_128, 16),
     )
     @eval begin
-        function onesweep_sort!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize} = Val(4096)) where {KeyV <: Vector{$KeyT}, OffsetV <: Vector{UInt64}, TileSize}
+        function onesweep_sort!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize} = Val(4096)) where {KeyV <: Vector{$KeyT}, OffsetV <: Vector{UInt32}, TileSize}
             # Nelems: number of elements that need to be sorted
             nelems = length(codes)
             # Number of data tiles
@@ -69,7 +69,7 @@ for (KeyT, Workspace, NPasses) in (
             return onesweep_sort!(codes, $Workspace, Val(TileSize))
         end
 
-        function onesweep_sortperm!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize} = Val(4096)) where {KeyV <: Vector{$KeyT}, OffsetV <: Vector{UInt64}, TileSize}
+        function onesweep_sortperm!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize} = Val(4096)) where {KeyV <: Vector{$KeyT}, OffsetV <: Vector{UInt32}, TileSize}
             # Nelems: number of elements that need to be sorted
             nelems = length(codes)
             # Number of data tiles

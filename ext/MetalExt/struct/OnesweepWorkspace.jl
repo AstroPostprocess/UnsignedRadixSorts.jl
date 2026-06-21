@@ -1,5 +1,5 @@
 """
-    initialize_perm_indices!(perm::Vector{UInt64}, nelems::Int)
+    initialize_perm_indices!(perm::Vector{UInt32}, nelems::Int)
 
 Fill a permutation buffer with 1-based Julia source indices.
 
@@ -8,13 +8,13 @@ Fill a permutation buffer with 1-based Julia source indices.
 - `perm`: Permutation buffer to initialize.
 - `nelems`: Number of indices to write.
 """
-@inline function UnsignedRadixSorts.initialize_perm_indices!(perm :: MtlDeviceVector{UInt64}, nelems :: Int)
+@inline function UnsignedRadixSorts.initialize_perm_indices!(perm :: MtlDeviceVector{UInt32}, nelems :: Int)
     tid = Int(Metal.thread_position_in_grid().x)
     stride = Int(Metal.threads_per_grid().x)
 
     i = tid
     while i <= nelems
-        perm[i] = UInt64(i)
+        perm[i] = UInt32(i)
 
         i += stride
     end
@@ -22,7 +22,7 @@ Fill a permutation buffer with 1-based Julia source indices.
 end
 
 """
-    initialize_perm_workspace!(ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems::Int, ntiles::Int, ::Val{NWorkers}, ::Val{ThreadsPerWorker}, ::Val{TileSize}) where {KeyT <: Unsigned, KeyV <: MtlVector{KeyT}, OffsetV <: MtlVector{UInt64}, NWorkers, ThreadsPerWorker, TileSize}
+    initialize_perm_workspace!(ws::OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems::Int, ntiles::Int, ::Val{NWorkers}, ::Val{ThreadsPerWorker}, ::Val{TileSize}) where {KeyT <: Unsigned, KeyV <: MtlVector{KeyT}, OffsetV <: MtlVector{UInt32}, NWorkers, ThreadsPerWorker, TileSize}
 
 Resize and clear the Onesweep workspace for permutation sorting.
 
@@ -35,7 +35,7 @@ Resize and clear the Onesweep workspace for permutation sorting.
 - `::Val{ThreadsPerWorker}`: Compile-time number of Metal threads used to initialize permutation indices.
 - `::Val{TileSize}`: Compile-time tile size used for local rank storage.
 """
-function UnsignedRadixSorts.initialize_perm_workspace!(ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems :: Int, ntiles :: Int, :: Val{NWorkers}, :: Val{ThreadsPerWorker}, :: Val{TileSize}) where {KeyT <: Unsigned, KeyV <: MtlVector{KeyT}, OffsetV <: MtlVector{UInt64}, NWorkers, ThreadsPerWorker, TileSize}
+function UnsignedRadixSorts.initialize_perm_workspace!(ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems :: Int, ntiles :: Int, :: Val{NWorkers}, :: Val{ThreadsPerWorker}, :: Val{TileSize}) where {KeyT <: Unsigned, KeyV <: MtlVector{KeyT}, OffsetV <: MtlVector{UInt32}, NWorkers, ThreadsPerWorker, TileSize}
     # Initialize the common key-sorting workspace.
     initialize_workspace!(ws, nelems, ntiles, Val(NWorkers), Val(TileSize))
 

@@ -19,7 +19,7 @@
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt64}, TileSize, Pass}
+        @inline function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt32}, TileSize, Pass}
 
             lookback = ws.lookback
             tile_counter = ws.tile_counter
@@ -46,12 +46,12 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # rank_cursors[bucket]   ~= temporary cursor for stable rank creation
             # global_offsets[bucket] ~= CUB TempStorage.global_offsets
             # local_ranks[i]         ~= tile-local sorted rank for element i
-            local_counts = Metal.MtlThreadGroupArray(UInt64, 256)
-            local_offsets = Metal.MtlThreadGroupArray(UInt64, 256)
-            rank_cursors = Metal.MtlThreadGroupArray(UInt64, 256)
-            global_offsets = Metal.MtlThreadGroupArray(UInt64, 256)
-            local_ranks = Metal.MtlThreadGroupArray(UInt64, TileSize)
-            claimed_tile = Metal.MtlThreadGroupArray(UInt64, 1)
+            local_counts = Metal.MtlThreadGroupArray(UInt32, 256)
+            local_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
+            rank_cursors = Metal.MtlThreadGroupArray(UInt32, 256)
+            global_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
+            local_ranks = Metal.MtlThreadGroupArray(UInt32, TileSize)
+            claimed_tile = Metal.MtlThreadGroupArray(UInt32, 1)
 
             lane_id = Int(Metal.thread_position_in_threadgroup().x)
             nlanes = Int(Metal.threads_per_threadgroup().x)
@@ -69,7 +69,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 # the claimed tile id is then broadcast through threadgroup
                 # memory so all lanes cooperate on the same tile.
                 if lane_id == 1
-                    @inbounds claimed_tile[1] = Metal.atomic_fetch_add_explicit(pointer(tile_counter, 1), UInt64(1))
+                    @inbounds claimed_tile[1] = Metal.atomic_fetch_add_explicit(pointer(tile_counter, 1), UInt32(1))
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
@@ -87,10 +87,10 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 bucket_idx = lane_id
                 while bucket_idx <= 256
                     @inbounds begin
-                        local_counts[bucket_idx] = zero(UInt64)
-                        local_offsets[bucket_idx] = zero(UInt64)
-                        rank_cursors[bucket_idx] = zero(UInt64)
-                        global_offsets[bucket_idx] = zero(UInt64)
+                        local_counts[bucket_idx] = zero(UInt32)
+                        local_offsets[bucket_idx] = zero(UInt32)
+                        rank_cursors[bucket_idx] = zero(UInt32)
+                        global_offsets[bucket_idx] = zero(UInt32)
                     end
                     bucket_idx += nlanes
                 end
@@ -103,7 +103,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 while local_i <= tile_len
                     i = rangemin + local_i - 1
                     @inbounds bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
-                    Metal.atomic_fetch_add_explicit(pointer(local_counts, bucket), UInt64(1))
+                    Metal.atomic_fetch_add_explicit(pointer(local_counts, bucket), UInt32(1))
                     local_i += nlanes
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
@@ -131,7 +131,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 # this serial for now prevents subtle stability bugs while the
                 # surrounding OneSweep protocol is brought up.
                 if lane_id == 1
-                    running = zero(UInt64)
+                    running = zero(UInt32)
                     @inbounds for bucket in 1:256
                         local_offsets[bucket] = running
                         rank_cursors[bucket] = running
@@ -143,7 +143,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                         bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
                         rank = rank_cursors[bucket]
                         local_ranks[local_j] = rank
-                        rank_cursors[bucket] = rank + one(UInt64)
+                        rank_cursors[bucket] = rank + one(UInt32)
                     end
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
@@ -158,7 +158,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #       bucket_start + previous - local_offsets[bucket]
                 bucket_idx = lane_id
                 while bucket_idx <= 256
-                    previous = zero(UInt64)
+                    previous = zero(UInt32)
 
                     prev_tile = tile_id - 1
                     while prev_tile >= 0
@@ -167,7 +167,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
 
                         # Wait until the previous tile has published either a
                         # PARTIAL count or a GLOBAL prefix.
-                        while entry == zero(UInt64)
+                        while entry == zero(UInt32)
                             entry = Metal.atomic_load_explicit(pointer(lookback, idx))
                         end
 
@@ -214,7 +214,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             return nothing
         end
 
-        @inline function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt64}, TileSize, Pass}
+        @inline function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt32}, TileSize, Pass}
 
             lookback = ws.lookback
             tile_counter = ws.tile_counter
@@ -241,12 +241,12 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
 
             # CUDA __shared__ equivalent. This is intentionally identical to
             # onesweep_pass_kernel!; sortperm only adds a second scatter store.
-            local_counts = Metal.MtlThreadGroupArray(UInt64, 256)
-            local_offsets = Metal.MtlThreadGroupArray(UInt64, 256)
-            rank_cursors = Metal.MtlThreadGroupArray(UInt64, 256)
-            global_offsets = Metal.MtlThreadGroupArray(UInt64, 256)
-            local_ranks = Metal.MtlThreadGroupArray(UInt64, TileSize)
-            claimed_tile = Metal.MtlThreadGroupArray(UInt64, 1)
+            local_counts = Metal.MtlThreadGroupArray(UInt32, 256)
+            local_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
+            rank_cursors = Metal.MtlThreadGroupArray(UInt32, 256)
+            global_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
+            local_ranks = Metal.MtlThreadGroupArray(UInt32, TileSize)
+            claimed_tile = Metal.MtlThreadGroupArray(UInt32, 1)
 
             lane_id = Int(Metal.thread_position_in_threadgroup().x)
             nlanes = Int(Metal.threads_per_threadgroup().x)
@@ -256,7 +256,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 # then cooperate on that tile and share the claimed id through
                 # threadgroup memory.
                 if lane_id == 1
-                    @inbounds claimed_tile[1] = Metal.atomic_fetch_add_explicit(pointer(tile_counter, 1), UInt64(1))
+                    @inbounds claimed_tile[1] = Metal.atomic_fetch_add_explicit(pointer(tile_counter, 1), UInt32(1))
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
@@ -270,10 +270,10 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 bucket_idx = lane_id
                 while bucket_idx <= 256
                     @inbounds begin
-                        local_counts[bucket_idx] = zero(UInt64)
-                        local_offsets[bucket_idx] = zero(UInt64)
-                        rank_cursors[bucket_idx] = zero(UInt64)
-                        global_offsets[bucket_idx] = zero(UInt64)
+                        local_counts[bucket_idx] = zero(UInt32)
+                        local_offsets[bucket_idx] = zero(UInt32)
+                        rank_cursors[bucket_idx] = zero(UInt32)
+                        global_offsets[bucket_idx] = zero(UInt32)
                     end
                     bucket_idx += nlanes
                 end
@@ -283,7 +283,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 while local_i <= tile_len
                     i = rangemin + local_i - 1
                     @inbounds bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
-                    Metal.atomic_fetch_add_explicit(pointer(local_counts, bucket), UInt64(1))
+                    Metal.atomic_fetch_add_explicit(pointer(local_counts, bucket), UInt32(1))
                     local_i += nlanes
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
@@ -301,7 +301,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 # Correctness-first stable rank construction. This is the part
                 # that should later become a real CUB-style BlockRadixRank.
                 if lane_id == 1
-                    running = zero(UInt64)
+                    running = zero(UInt32)
                     @inbounds for bucket in 1:256
                         local_offsets[bucket] = running
                         rank_cursors[bucket] = running
@@ -313,21 +313,21 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                         bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
                         rank = rank_cursors[bucket]
                         local_ranks[local_j] = rank
-                        rank_cursors[bucket] = rank + one(UInt64)
+                        rank_cursors[bucket] = rank + one(UInt32)
                     end
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
                 bucket_idx = lane_id
                 while bucket_idx <= 256
-                    previous = zero(UInt64)
+                    previous = zero(UInt32)
 
                     prev_tile = tile_id - 1
                     while prev_tile >= 0
                         idx = UnsignedRadixSorts._lookback_index(prev_tile, bucket_idx)
                         entry = Metal.atomic_load_explicit(pointer(lookback, idx))
 
-                        while entry == zero(UInt64)
+                        while entry == zero(UInt32)
                             entry = Metal.atomic_load_explicit(pointer(lookback, idx))
                         end
 

@@ -5,7 +5,7 @@ for (KeyT, NPasses) in (
         (UInt64,  8)
     )
     @eval begin
-        function UnsignedRadixSorts.onesweep_sort!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize} = Val(4096), :: Val{NThreadgroups} = Val(256), :: Val{ThreadsPerGroup} = Val(256)) where {KeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt64}, TileSize, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.onesweep_sort!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize} = Val(4096), :: Val{NThreadgroups} = Val(256), :: Val{ThreadsPerGroup} = Val(256)) where {KeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
             # Nelems: number of elements that need to be sorted
             nelems = length(codes)
             # Number of data tiles
@@ -35,7 +35,7 @@ for (KeyT, NPasses) in (
             return onesweep_sort!(codes, Workspace, Val(TileSize), Val(NThreadgroups), Val(ThreadsPerGroup))
         end
 
-        function UnsignedRadixSorts.onesweep_sortperm!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize} = Val(4096), :: Val{NThreadgroups} = Val(256), :: Val{ThreadsPerGroup} = Val(256)) where {KeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt64}, TileSize, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.onesweep_sortperm!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize} = Val(4096), :: Val{NThreadgroups} = Val(256), :: Val{ThreadsPerGroup} = Val(256)) where {KeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
             # Nelems: number of elements that need to be sorted
             nelems = length(codes)
             # Number of data tiles

@@ -31,10 +31,10 @@ for (KeyT, NPasses, NParts) in (
         #    (pass, bucket) into ws.bucket_offsets.
         # 2. bucket_offsets_exclusive_scan_kernel! converts those counts into
         #    1-based exclusive bucket starts for the later OneSweep pass.
-        function UnsignedRadixSorts.prepare_bucket_offsets!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, codes :: KeyV, :: Val{NThreadgroups} = Val(256), :: Val{ThreadsPerGroup} = Val(128)) where {KeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt64}, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.prepare_bucket_offsets!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, codes :: KeyV, :: Val{NThreadgroups} = Val(256), :: Val{ThreadsPerGroup} = Val(128)) where {KeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, NThreadgroups, ThreadsPerGroup}
             # Clear CUB's d_bins equivalent. After the histogram kernel this
             # buffer holds counts; after the scan kernel it holds bucket starts.
-            fill!(ws.bucket_offsets, zero(UInt64))
+            fill!(ws.bucket_offsets, zero(UInt32))
 
             # CUDA mental model:
             #
@@ -71,7 +71,7 @@ for (KeyT, NPasses, NParts) in (
         #
         # where pass and bucket are 1-based Julia indices, and part is the
         # private histogram slice chosen from the lane id.
-        @inline function prepass_histogram_kernel!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, codes :: KeyV) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt64}}
+        @inline function prepass_histogram_kernel!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, codes :: KeyV) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt32}}
             nelems = length(codes)
 
             # CUDA equivalents:
@@ -92,14 +92,14 @@ for (KeyT, NPasses, NParts) in (
             # CUB uses multiple "parts" to reduce atomic contention when many
             # lanes hit the same bucket. This is threadgroup memory, not global
             # workspace memory.
-            bins = Metal.MtlThreadGroupArray(UInt64, 256 * $NPasses * $NParts)
+            bins = Metal.MtlThreadGroupArray(UInt32, 256 * $NPasses * $NParts)
 
             # Cooperatively clear the whole shared histogram. Every lane clears
             # a strided subset, then the barrier ensures all bins are zero before
             # any lane starts accumulating counts.
             bin_idx = lane_id
             while bin_idx <= length(bins)
-                @inbounds bins[bin_idx] = zero(UInt64)
+                @inbounds bins[bin_idx] = zero(UInt32)
                 bin_idx += nlanes
             end
             Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
@@ -132,7 +132,7 @@ for (KeyT, NPasses, NParts) in (
                     # High-frequency atomic, but only in threadgroup/shared
                     # memory. This is the CUB-style optimization over doing one
                     # global atomic per key/pass.
-                    Metal.atomic_fetch_add_explicit(pointer(bins, idx), UInt64(1))
+                    Metal.atomic_fetch_add_explicit(pointer(bins, idx), UInt32(1))
                 end
                 i += stride
             end
@@ -148,13 +148,13 @@ for (KeyT, NPasses, NParts) in (
                 bucket = ((bucket_idx - 1) % 256) + 1
 
                 # Reduce bins[pass, bucket, 1:NParts].
-                count = zero(UInt64)
+                count = zero(UInt32)
                 @inbounds for part_idx in 1:$NParts
                     idx = $NParts * (256 * (pass - 1) + (bucket - 1)) + part_idx
                     count += bins[idx]
                 end
 
-                if count > zero(UInt64)
+                if count > zero(UInt32)
                     # Low-frequency global atomic:
                     #
                     #   one atomic per threadgroup/pass/bucket with non-zero
@@ -180,13 +180,13 @@ for (KeyT, NPasses, NParts) in (
         # pass, and each of its 256 lanes owns one bucket. A simple shared-memory
         # Hillis-Steele scan is used here; CUB's BlockScan is more optimized, but
         # the dataflow and launch shape are the same.
-        @inline function bucket_offsets_exclusive_scan_kernel!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt64}}
+        @inline function bucket_offsets_exclusive_scan_kernel!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt32}}
             # group_id is the pass id because this kernel is launched with
             # groups=(NPasses,) and threads=(256,).
             pass = Int(Metal.threadgroup_position_in_grid().x)
             bucket = Int(Metal.thread_position_in_threadgroup().x)
 
-            counts = Metal.MtlThreadGroupArray(UInt64, 256)
+            counts = Metal.MtlThreadGroupArray(UInt32, 256)
 
             # Load this pass's bucket counts into threadgroup memory. At this
             # point ws.bucket_offsets still holds histogram counts, not starts.
@@ -199,7 +199,7 @@ for (KeyT, NPasses, NParts) in (
             # implementation.
             offset = 1
             while offset < 256
-                addend = bucket > offset ? counts[bucket - offset] : zero(UInt64)
+                addend = bucket > offset ? counts[bucket - offset] : zero(UInt32)
 
                 # Ensure every lane has read the previous scan stage before any
                 # lane writes this stage.
@@ -213,7 +213,7 @@ for (KeyT, NPasses, NParts) in (
             # Convert inclusive counts to 1-based exclusive starts. CUB's d_bins
             # are 0-based offsets; this Julia sorter stores output indices, so
             # bucket 1 starts at index 1.
-            start = bucket == 1 ? one(UInt64) : counts[bucket - 1] + one(UInt64)
+            start = bucket == 1 ? one(UInt32) : counts[bucket - 1] + one(UInt32)
             @inbounds ws.bucket_offsets[idx] = start
 
             return nothing
