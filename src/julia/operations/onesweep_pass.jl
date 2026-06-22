@@ -50,8 +50,10 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
 
         # Second CUB-like step:
         # compute this tile's local radix histogram.
-        @inbounds for b in 1:256
-            idx = _worker_bucket_index(worker_id, b)
+        ## initialize local counts buffer
+        @inbounds for bucket in 1:256
+            ### Get the scratch-buffer index for this worker and bucket.
+            idx = _worker_bucket_index(worker_id, bucket)
             local_counts[idx] = zero(UInt32)
         end
 
@@ -203,8 +205,8 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
 
         # Second CUB-like step:
         # compute this tile's local radix histogram.
-        @inbounds for b in 1:256
-            idx = _worker_bucket_index(worker_id, b)
+        @inbounds for bucket in 1:256
+            idx = _worker_bucket_index(worker_id, bucket)
             local_counts[idx] = zero(UInt32)
         end
 

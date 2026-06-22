@@ -84,15 +84,15 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 tile_len = rangemax - rangemin + 1
 
                 # Clear per-tile bucket storage cooperatively.
-                bucket_idx = lane_id
-                while bucket_idx <= 256
+                bucket = lane_id
+                while bucket <= 256
                     @inbounds begin
-                        local_counts[bucket_idx] = zero(UInt32)
-                        local_offsets[bucket_idx] = zero(UInt32)
-                        rank_cursors[bucket_idx] = zero(UInt32)
-                        global_offsets[bucket_idx] = zero(UInt32)
+                        local_counts[bucket] = zero(UInt32)
+                        local_offsets[bucket] = zero(UInt32)
+                        rank_cursors[bucket] = zero(UInt32)
+                        global_offsets[bucket] = zero(UInt32)
                     end
-                    bucket_idx += nlanes
+                    bucket += nlanes
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
@@ -111,13 +111,13 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 # Publish this tile's local counts as PARTIAL lookback entries.
                 # This is global memory because later tiles may be processed by
                 # different threadgroups.
-                bucket_idx = lane_id
-                while bucket_idx <= 256
-                    @inbounds count = local_counts[bucket_idx]
-                    idx = UnsignedRadixSorts._lookback_index(tile_id, bucket_idx)
+                bucket = lane_id
+                while bucket <= 256
+                    @inbounds count = local_counts[bucket]
+                    idx = UnsignedRadixSorts._lookback_index(tile_id, bucket)
                     entry = UnsignedRadixSorts._partial_entry(count)
                     Metal.atomic_store_explicit(pointer(lookback, idx), entry)
-                    bucket_idx += nlanes
+                    bucket += nlanes
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
@@ -156,13 +156,13 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #
                 #   global_offsets[bucket] =
                 #       bucket_start + previous - local_offsets[bucket]
-                bucket_idx = lane_id
-                while bucket_idx <= 256
+                bucket = lane_id
+                while bucket <= 256
                     previous = zero(UInt32)
 
                     prev_tile = tile_id - 1
                     while prev_tile >= 0
-                        idx = UnsignedRadixSorts._lookback_index(prev_tile, bucket_idx)
+                        idx = UnsignedRadixSorts._lookback_index(prev_tile, bucket)
                         entry = Metal.atomic_load_explicit(pointer(lookback, idx))
 
                         # Wait until the previous tile has published either a
@@ -181,17 +181,17 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                     end
 
                     @inbounds begin
-                        local_count = local_counts[bucket_idx]
-                        bucket_start = bucket_offsets[UnsignedRadixSorts._bucket_offsets_index(Pass, bucket_idx)]
-                        global_offsets[bucket_idx] = bucket_start + previous - local_offsets[bucket_idx]
+                        local_count = local_counts[bucket]
+                        bucket_start = bucket_offsets[UnsignedRadixSorts._bucket_offsets_index(Pass, bucket)]
+                        global_offsets[bucket] = bucket_start + previous - local_offsets[bucket]
                     end
 
                     # Upgrade this tile's lookback entry from PARTIAL to GLOBAL.
-                    idx_l = UnsignedRadixSorts._lookback_index(tile_id, bucket_idx)
+                    idx_l = UnsignedRadixSorts._lookback_index(tile_id, bucket)
                     global_entry = UnsignedRadixSorts._global_entry(previous + local_count)
                     Metal.atomic_store_explicit(pointer(lookback, idx_l), global_entry)
 
-                    bucket_idx += nlanes
+                    bucket += nlanes
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
@@ -267,15 +267,15 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 rangemax = min(rangemin + TileSize - 1, nelems)
                 tile_len = rangemax - rangemin + 1
 
-                bucket_idx = lane_id
-                while bucket_idx <= 256
+                bucket = lane_id
+                while bucket <= 256
                     @inbounds begin
-                        local_counts[bucket_idx] = zero(UInt32)
-                        local_offsets[bucket_idx] = zero(UInt32)
-                        rank_cursors[bucket_idx] = zero(UInt32)
-                        global_offsets[bucket_idx] = zero(UInt32)
+                        local_counts[bucket] = zero(UInt32)
+                        local_offsets[bucket] = zero(UInt32)
+                        rank_cursors[bucket] = zero(UInt32)
+                        global_offsets[bucket] = zero(UInt32)
                     end
-                    bucket_idx += nlanes
+                    bucket += nlanes
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
@@ -288,13 +288,13 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
-                bucket_idx = lane_id
-                while bucket_idx <= 256
-                    @inbounds count = local_counts[bucket_idx]
-                    idx = UnsignedRadixSorts._lookback_index(tile_id, bucket_idx)
+                bucket = lane_id
+                while bucket <= 256
+                    @inbounds count = local_counts[bucket]
+                    idx = UnsignedRadixSorts._lookback_index(tile_id, bucket)
                     entry = UnsignedRadixSorts._partial_entry(count)
                     Metal.atomic_store_explicit(pointer(lookback, idx), entry)
-                    bucket_idx += nlanes
+                    bucket += nlanes
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
@@ -318,13 +318,13 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
-                bucket_idx = lane_id
-                while bucket_idx <= 256
+                bucket = lane_id
+                while bucket <= 256
                     previous = zero(UInt32)
 
                     prev_tile = tile_id - 1
                     while prev_tile >= 0
-                        idx = UnsignedRadixSorts._lookback_index(prev_tile, bucket_idx)
+                        idx = UnsignedRadixSorts._lookback_index(prev_tile, bucket)
                         entry = Metal.atomic_load_explicit(pointer(lookback, idx))
 
                         while entry == zero(UInt32)
@@ -341,16 +341,16 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                     end
 
                     @inbounds begin
-                        local_count = local_counts[bucket_idx]
-                        bucket_start = bucket_offsets[UnsignedRadixSorts._bucket_offsets_index(Pass, bucket_idx)]
-                        global_offsets[bucket_idx] = bucket_start + previous - local_offsets[bucket_idx]
+                        local_count = local_counts[bucket]
+                        bucket_start = bucket_offsets[UnsignedRadixSorts._bucket_offsets_index(Pass, bucket)]
+                        global_offsets[bucket] = bucket_start + previous - local_offsets[bucket]
                     end
 
-                    idx_l = UnsignedRadixSorts._lookback_index(tile_id, bucket_idx)
+                    idx_l = UnsignedRadixSorts._lookback_index(tile_id, bucket)
                     global_entry = UnsignedRadixSorts._global_entry(previous + local_count)
                     Metal.atomic_store_explicit(pointer(lookback, idx_l), global_entry)
 
-                    bucket_idx += nlanes
+                    bucket += nlanes
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
