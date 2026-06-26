@@ -31,13 +31,14 @@ Resize and clear the Onesweep workspace for permutation sorting.
 - `ws`: Workspace whose key-sorting and permutation buffers are resized and initialized.
 - `nelems`: Number of elements to sort.
 - `ntiles`: Number of tiles processed by a radix pass.
-- `::Val{NBlocks}`: Compile-time number of CUDA blocks used for scratch storage.
+- `::Val{NBlocks}`: Compile-time number of CUDA blocks used for permutation initialization.
 - `::Val{ThreadsPerBlock}`: Compile-time number of CUDA threads per block used to initialize permutation indices.
-- `::Val{TileSize}`: Compile-time tile size used for local rank storage.
+- `::Val{TileSize}`: Compile-time tile size used by the later pass kernel's shared-memory rank storage.
 """
 function UnsignedRadixSorts.initialize_perm_workspace!(ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems :: Int, ntiles :: Int, :: Val{NBlocks}, :: Val{ThreadsPerBlock}, :: Val{TileSize}) where {KeyT <: Unsigned, KeyV <: CuVector{KeyT}, OffsetV <: CuVector{UInt32}, NBlocks, ThreadsPerBlock, TileSize}
-    # Initialize the common key-sorting workspace.
-    initialize_workspace!(ws, nelems, ntiles, Val(NBlocks), Val(TileSize))
+    # Initialize only the base workspace; GPU kernels keep local scratch in
+    # shared memory instead of ws.local_* buffers.
+    initialize_base_workspace!(ws, nelems, ntiles)
 
     # Resize the ping-pong permutation buffers.
     # perms[1] is initialized as the input permutation buffer.

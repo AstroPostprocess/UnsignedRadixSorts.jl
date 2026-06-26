@@ -8,12 +8,15 @@ for (KeyT, NPasses) in (
         function UnsignedRadixSorts.onesweep_sort!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize} = Val(4096), :: Val{NThreadgroups} = Val(256), :: Val{ThreadsPerGroup} = Val(256)) where {KeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
             # Nelems: number of elements that need to be sorted
             nelems = length(codes)
+            nelems == 0 && return nothing
+
             # Number of data tiles
             ntiles = cld(nelems, TileSize)
             # Number of workers/threads -> NThreadgroups
 
-            # Initialize workspace
-            initialize_workspace!(ws, nelems, ntiles, Val(NThreadgroups), Val(TileSize))
+            # Initialize only the base workspace; local pass scratch lives in
+            # Metal threadgroup memory.
+            initialize_base_workspace!(ws, nelems, ntiles)
 
             # Before the first pass: global histogram for bucket
             prepare_bucket_offsets!(ws, codes, Val(NThreadgroups), Val(ThreadsPerGroup))
@@ -38,6 +41,8 @@ for (KeyT, NPasses) in (
         function UnsignedRadixSorts.onesweep_sortperm!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize} = Val(4096), :: Val{NThreadgroups} = Val(256), :: Val{ThreadsPerGroup} = Val(256)) where {KeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
             # Nelems: number of elements that need to be sorted
             nelems = length(codes)
+            nelems == 0 && return similar(codes, UInt32, 0)
+
             # Number of data tiles
             ntiles = cld(nelems, TileSize)
             # Number of workers/threads -> NThreadgroups

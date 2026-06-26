@@ -13,6 +13,21 @@
 ##              -> resolve global prefix -> scatter
 ##
 ## The low-level rank construction is implemented in block_radix_rank.jl.
+##
+## Local CCCL reference:
+##
+##   temp/cccl_onesweep/cub/cub/agent/agent_radix_sort_onesweep.cuh
+##   detail::radix_sort::AgentRadixSortOnesweep
+##
+## The CCCL Process() shape is:
+##
+##   LoadKeys
+##   BlockRadixRankT::RankKeys(..., exclusive_digit_prefix, CountsCallback)
+##   ScatterKeysShared
+##   LoadBinsToOffsetsGlobal
+##   LookbackGlobal
+##   ScatterKeysGlobal
+##   GatherScatterValues
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
@@ -21,8 +36,14 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             lookback = ws.lookback
             tile_counter = ws.tile_counter
 
-            # Ping-pong source/destination selection. Pass is a compile-time Val,
-            # so this branch is resolved by specialization.
+            # ####################################################
+            # Select source/output buffers and bucket-offset buffers for this pass.
+            # Pass is a compile-time Val, so this branch is resolved by specialization.
+            #
+            # CCCL equivalent:
+            # AgentRadixSortOnesweep receives d_keys_in and d_keys_out after the
+            # dispatch layer has selected the active ping-pong buffers for this radix
+            # pass. Value pointers are null/ignored for keys-only sorting.
             if isodd(Pass)
                 src = codes
                 dst = ws.dst
@@ -34,6 +55,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             nelems = length(src)
             ntiles = cld(nelems, TileSize)
 
+            # bucket_offsets stores the pass-wide global start position for each radix bucket.
             bucket_offsets = ws.bucket_offsets
 
             # Block-local equivalent of CUB agent temporary storage.
@@ -43,6 +65,10 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # rank_cursors[bucket]   ~= temporary cursor for stable rank creation
             # global_offsets[bucket] ~= CUB TempStorage.global_offsets
             # local_ranks[i]         ~= tile-local sorted rank for element i
+            #
+            # CCCL equivalent:
+            # AgentRadixSortOnesweep::TempStorage_ contains rank_temp_storage,
+            # keys_out/values_out shared arrays, global_offsets, and block_idx.
             local_counts = CUDA.CuStaticSharedArray(UInt32, 256)
             local_offsets = CUDA.CuStaticSharedArray(UInt32, 256)
             rank_cursors = CUDA.CuStaticSharedArray(UInt32, 256)
@@ -55,6 +81,9 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             nthreads = Int(CUDA.blockDim().x)
 
             while true
+                # ####################################################
+                # First CUB-like step:
+                # dynamically claim tile ids from the global counter.
                 # Dynamic tile claim, CUDA mental model:
                 #
                 #   if (threadIdx.x == 0)
@@ -66,6 +95,13 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 # increment the global counter; the claimed tile id is then
                 # broadcast through shared memory so all threads cooperate on the
                 # same tile.
+                #
+                # CCCL equivalent:
+                # AgentRadixSortOnesweep constructor:
+                #
+                #   lane 0 atomically increments d_ctrs
+                #   the claimed block_idx is shared with the whole block
+                #   full_block is computed from block_idx and TILE_ITEMS
                 if thread_id == 1
                     @inbounds claimed_tile[1] = CUDA.atomic_add!(pointer(tile_counter, 1), UInt32(1))
                 end
@@ -81,7 +117,15 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 rangemax = min(rangemin + TileSize - 1, nelems)
                 tile_len = rangemax - rangemin + 1
 
-                # Clear per-tile bucket storage cooperatively.
+                # ####################################################
+                # Second CUB-like step:
+                # compute this tile's local radix histogram.
+                # Initialize this tile's scratch storage before accumulating the local histogram.
+                #
+                # CCCL equivalent:
+                # Process() first calls LoadKeys(block_idx * TILE_ITEMS, keys),
+                # then BlockRadixRankT::RankKeys computes both bins and ranks. This
+                # implementation splits the bin-count portion out explicitly.
                 bucket = thread_id
                 while bucket <= 256
                     @inbounds begin
@@ -105,9 +149,17 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 end
                 CUDA.sync_threads()
 
+                # ####################################################
+                # Third CUB-like step:
+                # publish this tile's local counts as PARTIAL entries.
                 # Publish this tile's local counts as PARTIAL lookback entries.
                 # This is global memory because later tiles may be processed by
                 # different blocks.
+                #
+                # CCCL equivalent:
+                # CountsCallback waits for lookback initialization, then calls
+                # LookbackPartial(bins), which stores a PARTIAL-masked bin count
+                # into d_lookback[block_idx, bin].
                 bucket = thread_id
                 while bucket <= 256
                     @inbounds count = local_counts[bucket]
@@ -118,9 +170,25 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 end
                 CUDA.sync_threads()
 
+                # ####################################################
+                # Fourth CUB-like step:
+                # compute 0-based tile-local exclusive digit offsets.
+                #
+                # CCCL equivalent:
+                # BlockRadixRankT::RankKeys returns exclusive_digit_prefix. Here
+                # local_offsets plays the same role.
+                # ####################################################
+                # Fifth CUB-like step:
+                # compute each element's 0-based tile-wide rank in bucket-sorted order.
                 # CUB-style BlockRadixRankMatchEarlyCounts replacement for the
                 # old serial rank builder. This computes exclusive_digit_prefix
                 # and stable tile-local ranks in parallel.
+                #
+                # CCCL equivalent:
+                # BlockRadixRankT::RankKeys writes ranks[ITEMS_PER_THREAD], and
+                # Process() then uses ScatterKeysShared(keys, ranks). This
+                # implementation stores the tile-local ranks in local_ranks and
+                # scatters directly from the active source buffer.
                 block_radix_rank_onesweep!(
                     src,
                     local_counts,
@@ -134,6 +202,9 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                     Val(Pass),
                 )
 
+                # ####################################################
+                # Sixth CUB-like step:
+                # look back over previous tiles and compute per-bucket global scatter offsets.
                 # Resolve global offsets through the decoupled lookback table.
                 #
                 # For each bucket, previous accumulates all same-bucket counts in
@@ -142,6 +213,19 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #
                 #   global_offsets[bucket] =
                 #       bucket_start + previous - local_offsets[bucket]
+                #
+                # CCCL equivalent:
+                # Process() calls:
+                #
+                #   LoadBinsToOffsetsGlobal(exclusive_digit_prefix)
+                #   LookbackGlobal(bins)
+                #   UpdateBinsGlobal(bins, exclusive_digit_prefix)
+                #
+                # LoadBinsToOffsetsGlobal seeds s.global_offsets[bin] from d_bins_in
+                # minus the local exclusive prefix. LookbackGlobal
+                # walks backward through d_lookback until a GLOBAL entry is
+                # found, publishes this block's GLOBAL prefix, and adds the
+                # previous-block contribution into s.global_offsets[bin].
                 bucket = thread_id
                 while bucket <= 256
                     previous = zero(UInt32)
@@ -168,6 +252,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
 
                     @inbounds begin
                         local_count = local_counts[bucket]
+                        # bucket_start is the pass-wide start of this bucket.
                         bucket_start = bucket_offsets[UnsignedRadixSorts._bucket_offsets_index(Pass, bucket)]
                         global_offsets[bucket] = bucket_start + previous - local_offsets[bucket]
                     end
@@ -181,9 +266,17 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 end
                 CUDA.sync_threads()
 
+                # ####################################################
+                # Seventh CUB-like step:
+                # scatter this tile using the bucket base and the 0-based tile-wide rank.
                 # Scatter keys. Each thread handles a strided subset of tile items.
                 # local_ranks are tile-wide sorted ranks, so adding the bucket's
                 # global offset gives the final 1-based Julia output index.
+                #
+                # CCCL equivalent:
+                # ScatterKeysGlobal computes a per-item global index from the tile item
+                # rank plus s.global_offsets[Digit(key)], then writes to d_keys_out.
+                # Keys-only Process() stops here.
                 local_i = thread_id
                 while local_i <= tile_len
                     i = rangemin + local_i - 1
@@ -205,9 +298,16 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             lookback = ws.lookback
             tile_counter = ws.tile_counter
 
+            # ####################################################
+            # Select source/output buffers and bucket-offset buffers for this pass.
             # Same ping-pong rule as the key-only pass, plus the matching
             # permutation buffers. The permutation value follows the key through
             # every pass, so the final returned buffer is the stable source order.
+            #
+            # CCCL equivalent:
+            # AgentRadixSortOnesweep receives both key and value input/output
+            # pointers. For sortperm, this implementation treats permutation
+            # indices as values.
             if isodd(Pass)
                 src = codes
                 dst = ws.dst
@@ -223,10 +323,15 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             nelems = length(src)
             ntiles = cld(nelems, TileSize)
 
+            # bucket_offsets stores the pass-wide global start position for each radix bucket.
             bucket_offsets = ws.bucket_offsets
 
             # CUDA __shared__ equivalent. This is intentionally identical to
             # onesweep_pass_kernel!; sortperm only adds a second scatter store.
+            #
+            # CCCL equivalent:
+            # AgentRadixSortOnesweep::TempStorage_ contains rank_temp_storage,
+            # keys_out/values_out shared arrays, global_offsets, and block_idx.
             local_counts = CUDA.CuStaticSharedArray(UInt32, 256)
             local_offsets = CUDA.CuStaticSharedArray(UInt32, 256)
             rank_cursors = CUDA.CuStaticSharedArray(UInt32, 256)
@@ -239,8 +344,18 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             nthreads = Int(CUDA.blockDim().x)
 
             while true
+                # ####################################################
+                # First CUB-like step:
+                # dynamically claim tile ids from the global counter.
                 # One CUDA block claims one tile. All threads then cooperate on
                 # that tile and share the claimed id through shared memory.
+                #
+                # CCCL equivalent:
+                # AgentRadixSortOnesweep constructor:
+                #
+                #   lane 0 atomically increments d_ctrs
+                #   the claimed block_idx is shared with the whole block
+                #   full_block is computed from block_idx and TILE_ITEMS
                 if thread_id == 1
                     @inbounds claimed_tile[1] = CUDA.atomic_add!(pointer(tile_counter, 1), UInt32(1))
                 end
@@ -253,6 +368,15 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 rangemax = min(rangemin + TileSize - 1, nelems)
                 tile_len = rangemax - rangemin + 1
 
+                # ####################################################
+                # Second CUB-like step:
+                # compute this tile's local radix histogram.
+                # Initialize this tile's scratch storage before accumulating the local histogram.
+                #
+                # CCCL equivalent:
+                # Process() first calls LoadKeys(block_idx * TILE_ITEMS, keys),
+                # then BlockRadixRankT::RankKeys computes both bins and ranks. This
+                # implementation splits the bin-count portion out explicitly.
                 bucket = thread_id
                 while bucket <= 256
                     @inbounds begin
@@ -274,6 +398,14 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 end
                 CUDA.sync_threads()
 
+                # ####################################################
+                # Third CUB-like step:
+                # publish this tile's local counts as PARTIAL entries.
+                #
+                # CCCL equivalent:
+                # CountsCallback waits for lookback initialization, then calls
+                # LookbackPartial(bins), which stores a PARTIAL-masked bin count
+                # into d_lookback[block_idx, bin].
                 bucket = thread_id
                 while bucket <= 256
                     @inbounds count = local_counts[bucket]
@@ -284,9 +416,25 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 end
                 CUDA.sync_threads()
 
+                # ####################################################
+                # Fourth CUB-like step:
+                # compute 0-based tile-local exclusive digit offsets.
+                #
+                # CCCL equivalent:
+                # BlockRadixRankT::RankKeys returns exclusive_digit_prefix. Here
+                # local_offsets plays the same role.
+                # ####################################################
+                # Fifth CUB-like step:
+                # compute each element's 0-based tile-wide rank in bucket-sorted order.
                 # CUB-style BlockRadixRankMatchEarlyCounts replacement for the
                 # old serial rank builder. This computes exclusive_digit_prefix
                 # and stable tile-local ranks in parallel.
+                #
+                # CCCL equivalent:
+                # BlockRadixRankT::RankKeys writes ranks[ITEMS_PER_THREAD], and
+                # Process() then uses ScatterKeysShared(keys, ranks). This
+                # implementation stores the tile-local ranks in local_ranks and
+                # scatters directly from the active source buffer.
                 block_radix_rank_onesweep!(
                     src,
                     local_counts,
@@ -300,6 +448,22 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                     Val(Pass),
                 )
 
+                # ####################################################
+                # Sixth CUB-like step:
+                # look back over previous tiles and compute per-bucket global scatter offsets.
+                #
+                # CCCL equivalent:
+                # Process() calls:
+                #
+                #   LoadBinsToOffsetsGlobal(exclusive_digit_prefix)
+                #   LookbackGlobal(bins)
+                #   UpdateBinsGlobal(bins, exclusive_digit_prefix)
+                #
+                # LoadBinsToOffsetsGlobal seeds s.global_offsets[bin] from d_bins_in
+                # minus the local exclusive prefix. LookbackGlobal
+                # walks backward through d_lookback until a GLOBAL entry is
+                # found, publishes this block's GLOBAL prefix, and adds the
+                # previous-block contribution into s.global_offsets[bin].
                 bucket = thread_id
                 while bucket <= 256
                     previous = zero(UInt32)
@@ -324,6 +488,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
 
                     @inbounds begin
                         local_count = local_counts[bucket]
+                        # bucket_start is the pass-wide start of this bucket.
                         bucket_start = bucket_offsets[UnsignedRadixSorts._bucket_offsets_index(Pass, bucket)]
                         global_offsets[bucket] = bucket_start + previous - local_offsets[bucket]
                     end
@@ -336,9 +501,17 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 end
                 CUDA.sync_threads()
 
+                # ####################################################
+                # Seventh CUB-like step:
+                # scatter this tile using the bucket base and the 0-based tile-wide rank.
                 # The only semantic difference from key-only sorting: scatter
                 # both the key and its original 1-based source index to the same
                 # output slot.
+                #
+                # CCCL equivalent:
+                # ScatterKeysGlobal writes keys, and GatherScatterValues loads values,
+                # scatters them through shared memory by ranks, then writes values to
+                # d_values_out at the same digit-derived global positions.
                 local_i = thread_id
                 while local_i <= tile_len
                     i = rangemin + local_i - 1

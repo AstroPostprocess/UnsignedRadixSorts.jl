@@ -212,9 +212,36 @@ A `OnesweepWorkspace` with zero-length buffers for keys, offsets, counters, and 
 OnesweepWorkspace(::Type{KeyV}) where {KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}}
 
 """
+    initialize_base_workspace!(ws::OnesweepWorkspace{KeyT}, nelems::Int, ntiles::Int) where {KeyT <: Unsigned}
+
+Resize and clear the base buffers required by all Onesweep backends.
+
+# Parameters
+
+- `ws`: Workspace whose internal buffers are resized and initialized.
+- `nelems`: Number of elements to sort.
+- `ntiles`: Number of tiles processed by a radix pass.
+"""
+function initialize_base_workspace!(ws :: OnesweepWorkspace{KeyT}, nelems :: Int, ntiles :: Int) where {KeyT <: Unsigned}
+    npass = _npasses(KeyT)
+
+    resize!(ws.dst, nelems)
+    resize!(ws.tile_counter, 1)
+    resize!(ws.lookback, 256 * ntiles)
+
+    resize!(ws.bucket_offsets, 256 * npass)
+
+    fill!(ws.tile_counter, zero(UInt32))
+    fill!(ws.lookback, zero(UInt32))
+    fill!(ws.bucket_offsets, zero(UInt32))
+
+    return nothing
+end
+
+"""
     initialize_workspace!(ws::OnesweepWorkspace{KeyT}, nelems::Int, ntiles::Int, ::Val{NWorkers}, ::Val{TileSize}) where {KeyT <: Unsigned, NWorkers, TileSize}
 
-Resize and clear the buffers required for Onesweep key sorting.
+Resize and clear the buffers required for CPU Onesweep key sorting.
 
 # Parameters
 
@@ -225,26 +252,16 @@ Resize and clear the buffers required for Onesweep key sorting.
 - `::Val{TileSize}`: Compile-time tile size used for local rank storage.
 """
 function initialize_workspace!(ws :: OnesweepWorkspace{KeyT}, nelems :: Int, ntiles :: Int, :: Val{NWorkers}, :: Val{TileSize}) where {KeyT <: Unsigned, NWorkers, TileSize}
-    npass = _npasses(KeyT)    
+    initialize_base_workspace!(ws, nelems, ntiles)
 
-    resize!(ws.dst, nelems)
-    resize!(ws.tile_counter, 1)
-    resize!(ws.lookback, 256 * ntiles)
-
-    resize!(ws.bucket_offsets, 256 * npass)
-    resize!(ws.prepass_counts, 256 * npass * NWorkers)
-
+    resize!(ws.prepass_counts, 256 * _npasses(KeyT) * NWorkers)
     resize!(ws.local_counts,   256 * NWorkers)
     resize!(ws.local_offsets,  256 * NWorkers)
     resize!(ws.global_offsets, 256 * NWorkers)
     resize!(ws.rank_cursors,   256 * NWorkers)
     resize!(ws.local_ranks,   TileSize * NWorkers)
 
-    fill!(ws.tile_counter, zero(UInt32))
-    fill!(ws.lookback, zero(UInt32))
-    fill!(ws.bucket_offsets, zero(UInt32))
     fill!(ws.prepass_counts, zero(UInt32))
-
     fill!(ws.local_counts, zero(UInt32))
     fill!(ws.local_offsets, zero(UInt32))
     fill!(ws.global_offsets, zero(UInt32))

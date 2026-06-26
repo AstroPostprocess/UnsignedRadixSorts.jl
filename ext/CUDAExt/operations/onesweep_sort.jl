@@ -16,8 +16,9 @@ for (KeyT, NPasses) in (
             # Number of CUDA blocks and threads per block are controlled by
             # NBlocks and ThreadsPerBlock.
 
-            # Initialize workspace
-            initialize_workspace!(ws, nelems, ntiles, Val(NBlocks), Val(TileSize))
+            # Initialize only the base workspace; local pass scratch lives in
+            # CUDA shared memory.
+            initialize_base_workspace!(ws, nelems, ntiles)
 
             # Before the first pass: global histogram for bucket
             prepare_bucket_offsets!(ws, codes, Val(NBlocks), Val(ThreadsPerBlock))

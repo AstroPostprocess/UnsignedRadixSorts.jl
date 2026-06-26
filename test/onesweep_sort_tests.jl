@@ -176,6 +176,36 @@ function assert_onesweep_bucket_offsets(codes::Vector{T}, tile_size::Int=7) wher
     end
 end
 
+@testset "Onesweep workspace initialization split" begin
+    T = UInt32
+    ws = OnesweepWorkspace(Vector{T})
+    nelems = 17
+    tile_size = 5
+    ntiles = cld(nelems, tile_size)
+    nworkers = Threads.nthreads()
+
+    initialize_base_workspace!(ws, nelems, ntiles)
+
+    @test length(ws.dst) == nelems
+    @test length(ws.tile_counter) == 1
+    @test length(ws.lookback) == 256 * ntiles
+    @test length(ws.bucket_offsets) == 256 * sizeof(T)
+    @test isempty(ws.prepass_counts)
+    @test isempty(ws.local_counts)
+    @test isempty(ws.local_offsets)
+    @test isempty(ws.global_offsets)
+    @test isempty(ws.rank_cursors)
+    @test isempty(ws.local_ranks)
+
+    initialize_workspace!(ws, nelems, ntiles, Val(nworkers), Val(tile_size))
+
+    @test length(ws.local_counts) == 256 * nworkers
+    @test length(ws.local_offsets) == 256 * nworkers
+    @test length(ws.global_offsets) == 256 * nworkers
+    @test length(ws.rank_cursors) == 256 * nworkers
+    @test length(ws.local_ranks) == tile_size * nworkers
+end
+
 @testset "Onesweep bucket offsets" begin
     lengths = (0, 1, 2, 7, 31, 64)
 
