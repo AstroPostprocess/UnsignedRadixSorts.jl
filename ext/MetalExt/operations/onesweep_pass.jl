@@ -1,38 +1,9 @@
-## CUB/CUDA vocabulary for this Metal code:
-##
-## - Metal threadgroup      ~= CUDA block
-## - Metal thread           ~= CUDA thread
-## - threads=(...)          ~= CUDA blockDim.x
-## - groups=(...)           ~= CUDA gridDim.x
-## - MtlThreadGroupArray    ~= CUDA __shared__ memory
-##
-## This is a correctness-first, CUB-shaped OneSweep pass. The global dataflow is
-## CUB-like:
-##
-##   claim tile -> local histogram/rank -> publish partial lookback
-##              -> resolve global prefix -> scatter
-##
-## The low-level ranking primitive is not yet CUB BlockRadixRank. Offset/rank
-## construction is deliberately serial inside one lane to preserve stable order
-## while the surrounding storage and lookback protocol are moved to threadgroup
-## memory.
-##
 ## Local CCCL reference:
 ##
-##   temp/cccl_onesweep/cub/cub/agent/agent_radix_sort_onesweep.cuh
+##   temp/cccl_onesweep_sources/cccl/cub/cub/agent/agent_radix_sort_onesweep.cuh
 ##   detail::radix_sort::AgentRadixSortOnesweep
 ##
-## The CCCL Process() shape is:
-##
-##   LoadKeys
-##   BlockRadixRankT::RankKeys(..., exclusive_digit_prefix, CountsCallback)
-##   ScatterKeysShared
-##   LoadBinsToOffsetsGlobal
-##   LookbackGlobal
-##   ScatterKeysGlobal
-##   GatherScatterValues
-##
-## Concrete CCCL reference shape:
+## CCCL Process() reference:
 ##
 ##   void Process()
 ##   {
@@ -75,6 +46,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # pass. Value pointers are null/ignored for keys-only sorting.
             #
             # CCCL reference code:
+            # CCCL source lines: 669-683
             #
             #   AgentRadixSortOnesweep(...,
             #       d_bins_out, d_bins_in,
@@ -108,6 +80,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # keys_out/values_out shared arrays, global_offsets, and block_idx.
             #
             # CCCL reference code:
+            # CCCL source lines: 177-190
             #
             #   struct TempStorage_ {
             #       union {
@@ -120,31 +93,32 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             #           PortionOffsetT block_idx;
             #       };
             #   };
-            local_counts = Metal.MtlThreadGroupArray(UInt32, 256)
-            local_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
-            rank_cursors = Metal.MtlThreadGroupArray(UInt32, 256)
+            local_counts   = Metal.MtlThreadGroupArray(UInt32, 256)
+            local_offsets  = Metal.MtlThreadGroupArray(UInt32, 256)
+            rank_cursors   = Metal.MtlThreadGroupArray(UInt32, 256)
             global_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
-            local_ranks = Metal.MtlThreadGroupArray(UInt32, TileSize)
-            claimed_tile = Metal.MtlThreadGroupArray(UInt32, 1)
+            local_ranks    = Metal.MtlThreadGroupArray(UInt32, TileSize)
+            claimed_tile   = Metal.MtlThreadGroupArray(UInt32, 1)
 
             lane_id = Int(Metal.thread_position_in_threadgroup().x)
-            nlanes = Int(Metal.threads_per_threadgroup().x)
+            nlanes  = Int(Metal.threads_per_threadgroup().x)
 
             while true
                 # ####################################################
-                # 1. Tile claim phase:
-                # Dynamically claim one tile id from the global counter.
-                # The claimed tile is the work unit corresponding to one CCCL block; the
-                # current execution unit processes that tile through all phases below.
+                # 1. Agent construction before Process(): claim the tile.
+                # CUB obtains block_idx in AgentRadixSortOnesweep constructor, then
+                # calls Process() for that claimed tile. This loop repeats the same
+                # constructor+Process unit until no tiles remain.
                 #
                 # CCCL equivalent:
-                # AgentRadixSortOnesweep constructor:
+                # AgentRadixSortOnesweep constructor prepares the Process() inputs:
                 #
                 #   lane 0 atomically increments d_ctrs
                 #   the claimed block_idx is shared with the whole block
                 #   full_block is computed from block_idx and TILE_ITEMS
                 #
                 # CCCL reference code:
+                # CCCL source lines: 699-708
                 #
                 #   if (threadIdx.x == 0) {
                 #       s.block_idx = atomicAdd(d_ctrs, 1);
@@ -152,6 +126,8 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #   __syncthreads();
                 #   block_idx = s.block_idx;
                 #   full_block = (block_idx + 1) * TILE_ITEMS <= num_items;
+
+                # Claim one tile from the global counter.
                 if lane_id == 1
                     @inbounds claimed_tile[1] = Metal.atomic_fetch_add_explicit(pointer(tile_counter, 1), UInt32(1))
                 end
@@ -168,18 +144,18 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 tile_len = rangemax - rangemin + 1
 
                 # ####################################################
-                # 2. Local histogram phase:
-                # Load the claimed tile and compute its local radix histogram.
-                # In CCCL the bin counts are produced by RankKeys through
-                # CountsCallback; this implementation materializes the count portion
-                # before rank construction.
+                # 2. Process(): LoadKeys, then RankKeys count path.
+                # CUB loads the tile into per-thread key arrays and enters RankKeys.
+                # RankKeys produces bins through CountsCallback; this implementation
+                # materializes the same bin counts before building ranks.
                 #
                 # CCCL equivalent:
-                # Process() first calls LoadKeys(block_idx * TILE_ITEMS, keys),
-                # then BlockRadixRankT::RankKeys computes both bins and ranks. This
-                # implementation splits the bin-count portion out explicitly.
+                # Process() calls LoadKeys(block_idx * TILE_ITEMS, keys), then
+                # BlockRadixRankT::RankKeys(... CountsCallback(...)). The count portion
+                # corresponds to the bins later passed to LookbackPartial/LookbackGlobal.
                 #
                 # CCCL reference code:
+                # CCCL source lines: 642-650
                 #
                 #   bit_ordered_type keys[ITEMS_PER_THREAD];
                 #   LoadKeys(block_idx * TILE_ITEMS, keys);
@@ -187,6 +163,8 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #       .RankKeys(keys, ranks, digit_extractor(),
                 #                 exclusive_digit_prefix,
                 #                 CountsCallback(*this, bins, keys));
+
+                # Clear per-bucket scratch for this tile.
                 bucket = lane_id
                 while bucket <= 256
                     @inbounds begin
@@ -199,6 +177,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
+                # Count tile items by radix bucket.
                 local_i = lane_id
                 while local_i <= tile_len
                     i = rangemin + local_i - 1
@@ -209,21 +188,24 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
                 # ####################################################
-                # 3. Partial lookback publish phase:
-                # Publish this tile's local counts as PARTIAL lookback entries.
-                # Later tiles can consume these entries while resolving decoupled
-                # lookback prefixes for each radix bucket.
+                # 3. Process(): CountsCallback -> LookbackPartial.
+                # During RankKeys, CUB invokes CountsCallback after the per-tile bin
+                # counts are known. The callback publishes PARTIAL lookback entries
+                # before the pass resolves global offsets.
                 #
                 # CCCL equivalent:
-                # CountsCallback waits for lookback initialization, then calls
-                # LookbackPartial(bins), which stores a PARTIAL-masked bin count
-                # into d_lookback[block_idx, bin].
+                # CountsCallback copies RankKeys' other_bins into bins, calls
+                # LookbackPartial(bins), and then may try CUB's short-circuit fast path.
+                # This implementation mirrors the required PARTIAL publication.
                 #
                 # CCCL reference code:
+                # CCCL source lines: 233-247
                 #
                 #   AtomicOffsetT& loc = d_lookback[block_idx * RADIX_DIGITS + bin];
                 #   PortionOffsetT value = bins[u] | LOOKBACK_PARTIAL_MASK;
                 #   ThreadStore(&loc, value);
+
+                # Publish this tile's bucket counts as PARTIAL entries.
                 bucket = lane_id
                 while bucket <= 256
                     @inbounds count = local_counts[bucket]
@@ -235,21 +217,19 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
                 # ####################################################
-                # 4. Local radix rank phase:
-                # Compute the tile-local exclusive digit prefix and each item's 0-based
-                # rank in bucket-sorted tile order.
-                # CCCL produces both values in one BlockRadixRankT::RankKeys call; this
-                # implementation stores the prefix in local_offsets and ranks in
-                # local_ranks.
+                # 4. Process(): RankKeys rank output and ScatterKeysShared equivalent.
+                # CUB's same RankKeys call also returns exclusive_digit_prefix and
+                # ranks. Process() then uses ScatterKeysShared(keys, ranks) to stage
+                # tile-ordered keys in shared memory. This implementation keeps
+                # local_offsets/local_ranks and scatters directly from src.
                 #
                 # CCCL equivalent:
-                # BlockRadixRankT::RankKeys returns exclusive_digit_prefix and
-                # writes ranks[ITEMS_PER_THREAD]. Process() then uses
-                # ScatterKeysShared(keys, ranks) before the global scatter. This
-                # implementation stores the tile-local ranks in local_ranks and
-                # scatters directly from the active source buffer.
+                # BlockRadixRankT::RankKeys returns exclusive_digit_prefix and ranks.
+                # The following ScatterKeysShared step is represented here by retaining
+                # local_ranks rather than physically staging keys in shared memory.
                 #
                 # CCCL reference code:
+                # CCCL source lines: 645-654
                 #
                 #   int exclusive_digit_prefix[BINS_PER_THREAD];
                 #   int ranks[ITEMS_PER_THREAD];
@@ -259,6 +239,8 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #                 CountsCallback(*this, bins, keys));
                 #   __syncthreads();
                 #   ScatterKeysShared(keys, ranks);
+
+                # Build exclusive bucket offsets and stable local ranks.
                 if lane_id == 1
                     running = zero(UInt32)
                     @inbounds for bucket in 1:256
@@ -278,11 +260,10 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
                 # ####################################################
-                # 5. Global offset lookback phase:
-                # Resolve per-bucket global scatter offsets through the decoupled
-                # lookback table.
-                # For each bucket, accumulate same-bucket counts from earlier tiles until
-                # a GLOBAL prefix entry is found, then publish this tile's GLOBAL prefix.
+                # 5. Process(): LoadBinsToOffsetsGlobal -> LookbackGlobal -> UpdateBinsGlobal.
+                # This is the decoupled lookback part of OneSweep. It combines the
+                # pass-wide bucket base, this tile's exclusive_digit_prefix, and previous
+                # tiles' same-bucket counts to produce global_offsets.
                 #
                 # CCCL equivalent:
                 # Process() calls:
@@ -298,6 +279,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 # previous-block contribution into s.global_offsets[bin].
                 #
                 # CCCL reference code:
+                # CCCL source lines: 276-311, 461-490
                 #
                 #   LoadBinsToOffsetsGlobal(offsets):
                 #       s.global_offsets[bin] = d_bins_in[bin] - offsets[u];
@@ -312,11 +294,15 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #       ThreadStore(&d_lookback[block_idx * RADIX_DIGITS + bin],
                 #                   inc_sum | LOOKBACK_GLOBAL_MASK);
                 #       s.global_offsets[bin] += inc_sum - bins[u];
+
+                # Resolve each bucket's global scatter base.
                 bucket = lane_id
                 while bucket <= 256
                     previous = zero(UInt32)
 
                     prev_tile = tile_id - 1
+
+                    # Walk backward until a GLOBAL prefix is found.
                     while prev_tile >= 0
                         idx = UnsignedRadixSorts._lookback_index(prev_tile, bucket)
                         entry = Metal.atomic_load_explicit(pointer(lookback, idx))
@@ -353,22 +339,26 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
                 # ####################################################
-                # 6. Global scatter phase:
-                # Scatter keys using the bucket base and the 0-based tile-wide rank.
-                # Adding the bucket's global offset to the tile-local rank gives the
-                # final Julia output index.
+                # 6. Process(): ScatterKeysGlobal.
+                # CUB scatters from s.keys_out using idx + s.global_offsets[Digit(key)].
+                # Since this implementation did not stage keys in s.keys_out, it
+                # computes the same final index from local_ranks and writes directly
+                # from src.
                 #
                 # CCCL equivalent:
                 # ScatterKeysGlobal computes a per-item global index from the tile item
                 # rank plus s.global_offsets[Digit(key)], then writes to d_keys_out.
-                # Keys-only Process() stops here.
+                # Keys-only Process() stops here; GatherScatterValues is a no-op.
                 #
                 # CCCL reference code:
+                # CCCL source lines: 493-589
                 #
                 #   int idx = threadIdx.x + u * BLOCK_THREADS;
                 #   bit_ordered_type key = s.keys_out[idx];
                 #   OffsetT global_idx = idx + s.global_offsets[Digit(key)];
                 #   d_keys_out[global_idx] = Twiddle::Out(key, decomposer);
+
+                # Scatter keys to final pass positions.
                 local_i = lane_id
                 while local_i <= tile_len
                     i = rangemin + local_i - 1
@@ -402,6 +392,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # indices as values.
             #
             # CCCL reference code:
+            # CCCL source lines: 669-683
             #
             #   AgentRadixSortOnesweep(...,
             #       d_bins_out, d_bins_in,
@@ -434,6 +425,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # keys_out/values_out shared arrays, global_offsets, and block_idx.
             #
             # CCCL reference code:
+            # CCCL source lines: 177-190
             #
             #   struct TempStorage_ {
             #       union {
@@ -458,19 +450,20 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
 
             while true
                 # ####################################################
-                # 1. Tile claim phase:
-                # Dynamically claim one tile id from the global counter.
-                # The claimed tile is the work unit corresponding to one CCCL block; the
-                # current execution unit processes that tile through all phases below.
+                # 1. Agent construction before Process(): claim the tile.
+                # CUB obtains block_idx in AgentRadixSortOnesweep constructor, then
+                # calls Process() for that claimed tile. This loop repeats the same
+                # constructor+Process unit until no tiles remain.
                 #
                 # CCCL equivalent:
-                # AgentRadixSortOnesweep constructor:
+                # AgentRadixSortOnesweep constructor prepares the Process() inputs:
                 #
                 #   lane 0 atomically increments d_ctrs
                 #   the claimed block_idx is shared with the whole block
                 #   full_block is computed from block_idx and TILE_ITEMS
                 #
                 # CCCL reference code:
+                # CCCL source lines: 699-708
                 #
                 #   if (threadIdx.x == 0) {
                 #       s.block_idx = atomicAdd(d_ctrs, 1);
@@ -478,6 +471,8 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #   __syncthreads();
                 #   block_idx = s.block_idx;
                 #   full_block = (block_idx + 1) * TILE_ITEMS <= num_items;
+
+                # Claim one tile from the global counter.
                 if lane_id == 1
                     @inbounds claimed_tile[1] = Metal.atomic_fetch_add_explicit(pointer(tile_counter, 1), UInt32(1))
                 end
@@ -491,18 +486,18 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 tile_len = rangemax - rangemin + 1
 
                 # ####################################################
-                # 2. Local histogram phase:
-                # Load the claimed tile and compute its local radix histogram.
-                # In CCCL the bin counts are produced by RankKeys through
-                # CountsCallback; this implementation materializes the count portion
-                # before rank construction.
+                # 2. Process(): LoadKeys, then RankKeys count path.
+                # CUB loads the tile into per-thread key arrays and enters RankKeys.
+                # RankKeys produces bins through CountsCallback; this implementation
+                # materializes the same bin counts before building ranks.
                 #
                 # CCCL equivalent:
-                # Process() first calls LoadKeys(block_idx * TILE_ITEMS, keys),
-                # then BlockRadixRankT::RankKeys computes both bins and ranks. This
-                # implementation splits the bin-count portion out explicitly.
+                # Process() calls LoadKeys(block_idx * TILE_ITEMS, keys), then
+                # BlockRadixRankT::RankKeys(... CountsCallback(...)). The count portion
+                # corresponds to the bins later passed to LookbackPartial/LookbackGlobal.
                 #
                 # CCCL reference code:
+                # CCCL source lines: 642-650
                 #
                 #   bit_ordered_type keys[ITEMS_PER_THREAD];
                 #   LoadKeys(block_idx * TILE_ITEMS, keys);
@@ -510,6 +505,8 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #       .RankKeys(keys, ranks, digit_extractor(),
                 #                 exclusive_digit_prefix,
                 #                 CountsCallback(*this, bins, keys));
+
+                # Clear per-bucket scratch for this tile.
                 bucket = lane_id
                 while bucket <= 256
                     @inbounds begin
@@ -522,6 +519,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 end
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
+                # Count tile items by radix bucket.
                 local_i = lane_id
                 while local_i <= tile_len
                     i = rangemin + local_i - 1
@@ -532,21 +530,24 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
                 # ####################################################
-                # 3. Partial lookback publish phase:
-                # Publish this tile's local counts as PARTIAL lookback entries.
-                # Later tiles can consume these entries while resolving decoupled
-                # lookback prefixes for each radix bucket.
+                # 3. Process(): CountsCallback -> LookbackPartial.
+                # During RankKeys, CUB invokes CountsCallback after the per-tile bin
+                # counts are known. The callback publishes PARTIAL lookback entries
+                # before the pass resolves global offsets.
                 #
                 # CCCL equivalent:
-                # CountsCallback waits for lookback initialization, then calls
-                # LookbackPartial(bins), which stores a PARTIAL-masked bin count
-                # into d_lookback[block_idx, bin].
+                # CountsCallback copies RankKeys' other_bins into bins, calls
+                # LookbackPartial(bins), and then may try CUB's short-circuit fast path.
+                # This implementation mirrors the required PARTIAL publication.
                 #
                 # CCCL reference code:
+                # CCCL source lines: 233-247
                 #
                 #   AtomicOffsetT& loc = d_lookback[block_idx * RADIX_DIGITS + bin];
                 #   PortionOffsetT value = bins[u] | LOOKBACK_PARTIAL_MASK;
                 #   ThreadStore(&loc, value);
+
+                # Publish this tile's bucket counts as PARTIAL entries.
                 bucket = lane_id
                 while bucket <= 256
                     @inbounds count = local_counts[bucket]
@@ -558,21 +559,19 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
                 # ####################################################
-                # 4. Local radix rank phase:
-                # Compute the tile-local exclusive digit prefix and each item's 0-based
-                # rank in bucket-sorted tile order.
-                # CCCL produces both values in one BlockRadixRankT::RankKeys call; this
-                # implementation stores the prefix in local_offsets and ranks in
-                # local_ranks.
+                # 4. Process(): RankKeys rank output and ScatterKeysShared equivalent.
+                # CUB's same RankKeys call also returns exclusive_digit_prefix and
+                # ranks. Process() then uses ScatterKeysShared(keys, ranks) to stage
+                # tile-ordered keys in shared memory. This implementation keeps
+                # local_offsets/local_ranks and scatters directly from src.
                 #
                 # CCCL equivalent:
-                # BlockRadixRankT::RankKeys returns exclusive_digit_prefix and
-                # writes ranks[ITEMS_PER_THREAD]. Process() then uses
-                # ScatterKeysShared(keys, ranks) before the global scatter. This
-                # implementation stores the tile-local ranks in local_ranks and
-                # scatters directly from the active source buffer.
+                # BlockRadixRankT::RankKeys returns exclusive_digit_prefix and ranks.
+                # The following ScatterKeysShared step is represented here by retaining
+                # local_ranks rather than physically staging keys in shared memory.
                 #
                 # CCCL reference code:
+                # CCCL source lines: 645-654
                 #
                 #   int exclusive_digit_prefix[BINS_PER_THREAD];
                 #   int ranks[ITEMS_PER_THREAD];
@@ -582,6 +581,8 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #                 CountsCallback(*this, bins, keys));
                 #   __syncthreads();
                 #   ScatterKeysShared(keys, ranks);
+
+                # Build exclusive bucket offsets and stable local ranks.
                 if lane_id == 1
                     running = zero(UInt32)
                     @inbounds for bucket in 1:256
@@ -601,11 +602,10 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
                 # ####################################################
-                # 5. Global offset lookback phase:
-                # Resolve per-bucket global scatter offsets through the decoupled
-                # lookback table.
-                # For each bucket, accumulate same-bucket counts from earlier tiles until
-                # a GLOBAL prefix entry is found, then publish this tile's GLOBAL prefix.
+                # 5. Process(): LoadBinsToOffsetsGlobal -> LookbackGlobal -> UpdateBinsGlobal.
+                # This is the decoupled lookback part of OneSweep. It combines the
+                # pass-wide bucket base, this tile's exclusive_digit_prefix, and previous
+                # tiles' same-bucket counts to produce global_offsets.
                 #
                 # CCCL equivalent:
                 # Process() calls:
@@ -621,6 +621,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 # previous-block contribution into s.global_offsets[bin].
                 #
                 # CCCL reference code:
+                # CCCL source lines: 276-311, 461-490
                 #
                 #   LoadBinsToOffsetsGlobal(offsets):
                 #       s.global_offsets[bin] = d_bins_in[bin] - offsets[u];
@@ -635,11 +636,15 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #       ThreadStore(&d_lookback[block_idx * RADIX_DIGITS + bin],
                 #                   inc_sum | LOOKBACK_GLOBAL_MASK);
                 #       s.global_offsets[bin] += inc_sum - bins[u];
+
+                # Resolve each bucket's global scatter base.
                 bucket = lane_id
                 while bucket <= 256
                     previous = zero(UInt32)
 
                     prev_tile = tile_id - 1
+
+                    # Walk backward until a GLOBAL prefix is found.
                     while prev_tile >= 0
                         idx = UnsignedRadixSorts._lookback_index(prev_tile, bucket)
                         entry = Metal.atomic_load_explicit(pointer(lookback, idx))
@@ -673,23 +678,27 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
                 # ####################################################
-                # 6. Global scatter phase:
-                # Scatter keys and permutation values to the same output slot.
-                # The only semantic difference from key-only sorting is the additional
-                # value scatter that follows the same digit-derived global position.
+                # 6. Process(): ScatterKeysGlobal, then GatherScatterValues.
+                # CUB scatters keys first, then for key-value sorting gathers values,
+                # scatters them through shared memory by ranks, and writes them to the
+                # same digit-derived positions. This implementation writes the
+                # permutation value next to the key at the computed final index.
                 #
                 # CCCL equivalent:
-                # ScatterKeysGlobal writes keys, and GatherScatterValues loads values,
-                # scatters them through shared memory by ranks, then writes values to
-                # d_values_out at the same digit-derived global positions.
+                # ScatterKeysGlobal writes keys. GatherScatterValues loads values,
+                # scatters them by ranks through shared memory, then ScatterValuesGlobal
+                # writes d_values_out at the same digit-derived global positions.
                 #
                 # CCCL reference code:
+                # CCCL source lines: 614-630, 663
                 #
                 #   ScatterKeysGlobal();
                 #   LoadValues(block_idx * TILE_ITEMS, values);
                 #   ScatterValuesShared(values, ranks);
                 #   ScatterValuesGlobal(digits);
                 #   d_values_out[global_idx] = value;
+
+                # Scatter keys and permutation indices to final pass positions.
                 local_i = lane_id
                 while local_i <= tile_len
                     i = rangemin + local_i - 1

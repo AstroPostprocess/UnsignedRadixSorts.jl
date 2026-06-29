@@ -1,30 +1,10 @@
 
-## CPU reference for the CUB-shaped OneSweep pass. The global dataflow is
-## CUB-like:
-##
-##   claim tile -> local histogram/rank -> publish partial lookback
-##              -> resolve global prefix -> scatter
-##
-## The CPU path keeps the same logical phases as the GPU kernels, but stores
-## temporary state in per-worker workspace arrays instead of threadgroup/shared
-## memory.
-##
 ## Local CCCL reference:
 ##
-##   temp/cccl_onesweep/cub/cub/agent/agent_radix_sort_onesweep.cuh
+##   temp/cccl_onesweep_sources/cccl/cub/cub/agent/agent_radix_sort_onesweep.cuh
 ##   detail::radix_sort::AgentRadixSortOnesweep
 ##
-## The high-level CCCL Process() shape is:
-##
-##   LoadKeys
-##   BlockRadixRankT::RankKeys(..., exclusive_digit_prefix, CountsCallback)
-##   ScatterKeysShared
-##   LoadBinsToOffsetsGlobal
-##   LookbackGlobal
-##   ScatterKeysGlobal
-##   GatherScatterValues
-##
-## Concrete CCCL reference shape:
+## CCCL Process() reference:
 ##
 ##   void Process()
 ##   {
@@ -76,6 +56,7 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
     # pass. Value pointers are null/ignored for keys-only sorting.
     #
     # CCCL reference code:
+    # CCCL source lines: 669-683
     #
     #   AgentRadixSortOnesweep(...,
     #       d_bins_out, d_bins_in,
@@ -109,6 +90,7 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
     # keys_out/values_out shared arrays, global_offsets, and block_idx.
     #
     # CCCL reference code:
+    # CCCL source lines: 177-190
     #
     #   struct TempStorage_ {
     #       union {
@@ -132,19 +114,20 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
 
     while true
         # ####################################################
-        # 1. Tile claim phase:
-        # Dynamically claim one tile id from the global counter.
-        # The claimed tile is the work unit corresponding to one CCCL block; the
-        # current execution unit processes that tile through all phases below.
+        # 1. Agent construction before Process(): claim the tile.
+        # CUB obtains block_idx in AgentRadixSortOnesweep constructor, then
+        # calls Process() for that claimed tile. This loop repeats the same
+        # constructor+Process unit until no tiles remain.
         #
         # CCCL equivalent:
-        # AgentRadixSortOnesweep constructor:
+        # AgentRadixSortOnesweep constructor prepares the Process() inputs:
         #
         #   lane 0 atomically increments d_ctrs
         #   the claimed block_idx is shared with the whole block
         #   full_block is computed from block_idx and TILE_ITEMS
         #
         # CCCL reference code:
+        # CCCL source lines: 699-708
         #
         #   if (threadIdx.x == 0) {
         #       s.block_idx = atomicAdd(d_ctrs, 1);
@@ -152,6 +135,8 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         #   __syncthreads();
         #   block_idx = s.block_idx;
         #   full_block = (block_idx + 1) * TILE_ITEMS <= num_items;
+
+        # Claim one tile from the global counter.
         new = Atomix.@atomic tile_counter[1] += one(UInt32)
         tile_id = Int(new - UInt32(1))
         tile_id < ntiles || break
@@ -161,18 +146,18 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         rangemax = min(rangemin + TileSize - 1, nelems)
 
         # ####################################################
-        # 2. Local histogram phase:
-        # Load the claimed tile and compute its local radix histogram.
-        # In CCCL the bin counts are produced by RankKeys through
-        # CountsCallback; this implementation materializes the count portion
-        # before rank construction.
+        # 2. Process(): LoadKeys, then RankKeys count path.
+        # CUB loads the tile into per-thread key arrays and enters RankKeys.
+        # RankKeys produces bins through CountsCallback; this implementation
+        # materializes the same bin counts before building ranks.
         #
         # CCCL equivalent:
-        # Process() first calls LoadKeys(block_idx * TILE_ITEMS, keys),
-        # then BlockRadixRankT::RankKeys computes both bins and ranks. This
-        # implementation splits the bin-count portion out explicitly.
+        # Process() calls LoadKeys(block_idx * TILE_ITEMS, keys), then
+        # BlockRadixRankT::RankKeys(... CountsCallback(...)). The count portion
+        # corresponds to the bins later passed to LookbackPartial/LookbackGlobal.
         #
         # CCCL reference code:
+        # CCCL source lines: 642-650
         #
         #   bit_ordered_type keys[ITEMS_PER_THREAD];
         #   LoadKeys(block_idx * TILE_ITEMS, keys);
@@ -180,12 +165,15 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         #       .RankKeys(keys, ranks, digit_extractor(),
         #                 exclusive_digit_prefix,
         #                 CountsCallback(*this, bins, keys));
+
+        # Clear local bucket counts for this tile.
         @inbounds for bucket in 1:256
             # Get the scratch-buffer index for this worker and bucket.
             idx = _worker_bucket_index(worker_id, bucket)
             local_counts[idx] = zero(UInt32)
         end
 
+        # Count tile items by radix bucket.
         @inbounds for i in rangemin:rangemax
             bucket = _radix_bucket(src[i], Pass)
             idx = _worker_bucket_index(worker_id, bucket)
@@ -193,21 +181,24 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         end
 
         # ####################################################
-        # 3. Partial lookback publish phase:
-        # Publish this tile's local counts as PARTIAL lookback entries.
-        # Later tiles can consume these entries while resolving decoupled
-        # lookback prefixes for each radix bucket.
+        # 3. Process(): CountsCallback -> LookbackPartial.
+        # During RankKeys, CUB invokes CountsCallback after the per-tile bin
+        # counts are known. The callback publishes PARTIAL lookback entries
+        # before the pass resolves global offsets.
         #
         # CCCL equivalent:
-        # CountsCallback waits for lookback initialization, then calls
-        # LookbackPartial(bins), which stores a PARTIAL-masked bin count
-        # into d_lookback[block_idx, bin].
+        # CountsCallback copies RankKeys' other_bins into bins, calls
+        # LookbackPartial(bins), and then may try CUB's short-circuit fast path.
+        # This implementation mirrors the required PARTIAL publication.
         #
         # CCCL reference code:
+        # CCCL source lines: 233-247
         #
         #   AtomicOffsetT& loc = d_lookback[block_idx * RADIX_DIGITS + bin];
         #   PortionOffsetT value = bins[u] | LOOKBACK_PARTIAL_MASK;
         #   ThreadStore(&loc, value);
+
+        # Publish this tile's bucket counts as PARTIAL entries.
         @inbounds for bucket in 1:256
             idx_wb = _worker_bucket_index(worker_id, bucket)
             count = local_counts[idx_wb]
@@ -216,21 +207,19 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         end
 
         # ####################################################
-        # 4. Local radix rank phase:
-        # Compute the tile-local exclusive digit prefix and each item's 0-based
-        # rank in bucket-sorted tile order.
-        # CCCL produces both values in one BlockRadixRankT::RankKeys call; this
-        # implementation stores the prefix in local_offsets and ranks in
-        # local_ranks.
+        # 4. Process(): RankKeys rank output and ScatterKeysShared equivalent.
+        # CUB's same RankKeys call also returns exclusive_digit_prefix and
+        # ranks. Process() then uses ScatterKeysShared(keys, ranks) to stage
+        # tile-ordered keys in shared memory. This implementation keeps
+        # local_offsets/local_ranks and scatters directly from src.
         #
         # CCCL equivalent:
-        # BlockRadixRankT::RankKeys returns exclusive_digit_prefix and
-        # writes ranks[ITEMS_PER_THREAD]. Process() then uses
-        # ScatterKeysShared(keys, ranks) before the global scatter. This
-        # implementation stores the tile-local ranks in local_ranks and
-        # scatters directly from the active source buffer.
+        # BlockRadixRankT::RankKeys returns exclusive_digit_prefix and ranks.
+        # The following ScatterKeysShared step is represented here by retaining
+        # local_ranks rather than physically staging keys in shared memory.
         #
         # CCCL reference code:
+        # CCCL source lines: 645-654
         #
         #   int exclusive_digit_prefix[BINS_PER_THREAD];
         #   int ranks[ITEMS_PER_THREAD];
@@ -240,6 +229,8 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         #                 CountsCallback(*this, bins, keys));
         #   __syncthreads();
         #   ScatterKeysShared(keys, ranks);
+
+        # Build exclusive bucket offsets and stable local ranks.
         running = zero(UInt32)
 
         @inbounds for bucket in 1:256
@@ -262,11 +253,10 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         end
 
         # ####################################################
-        # 5. Global offset lookback phase:
-        # Resolve per-bucket global scatter offsets through the decoupled
-        # lookback table.
-        # For each bucket, accumulate same-bucket counts from earlier tiles until
-        # a GLOBAL prefix entry is found, then publish this tile's GLOBAL prefix.
+        # 5. Process(): LoadBinsToOffsetsGlobal -> LookbackGlobal -> UpdateBinsGlobal.
+        # This is the decoupled lookback part of OneSweep. It combines the
+        # pass-wide bucket base, this tile's exclusive_digit_prefix, and previous
+        # tiles' same-bucket counts to produce global_offsets.
         #
         # CCCL equivalent:
         # Process() calls:
@@ -282,6 +272,7 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         # previous-block contribution into s.global_offsets[bin].
         #
         # CCCL reference code:
+        # CCCL source lines: 276-311, 461-490
         #
         #   LoadBinsToOffsetsGlobal(offsets):
         #       s.global_offsets[bin] = d_bins_in[bin] - offsets[u];
@@ -296,10 +287,14 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         #       ThreadStore(&d_lookback[block_idx * RADIX_DIGITS + bin],
         #                   inc_sum | LOOKBACK_GLOBAL_MASK);
         #       s.global_offsets[bin] += inc_sum - bins[u];
+
+        # Resolve each bucket's global scatter base.
         @inbounds for bucket in 1:256
             previous = zero(UInt32)
 
             prev_tile = tile_id - 1
+
+            # Walk backward until a GLOBAL prefix is found.
             while prev_tile >= 0
                 idx = _lookback_index(prev_tile, bucket)
 
@@ -337,22 +332,26 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         end
 
         # ####################################################
-        # 6. Global scatter phase:
-        # Scatter keys using the bucket base and the 0-based tile-wide rank.
-        # Adding the bucket's global offset to the tile-local rank gives the
-        # final Julia output index.
+        # 6. Process(): ScatterKeysGlobal.
+        # CUB scatters from s.keys_out using idx + s.global_offsets[Digit(key)].
+        # Since this implementation did not stage keys in s.keys_out, it
+        # computes the same final index from local_ranks and writes directly
+        # from src.
         #
         # CCCL equivalent:
         # ScatterKeysGlobal computes a per-item global index from the tile item
         # rank plus s.global_offsets[Digit(key)], then writes to d_keys_out.
-        # Keys-only Process() stops here.
+        # Keys-only Process() stops here; GatherScatterValues is a no-op.
         #
         # CCCL reference code:
+        # CCCL source lines: 493-589
         #
         #   int idx = threadIdx.x + u * BLOCK_THREADS;
         #   bit_ordered_type key = s.keys_out[idx];
         #   OffsetT global_idx = idx + s.global_offsets[Digit(key)];
         #   d_keys_out[global_idx] = Twiddle::Out(key, decomposer);
+
+        # Scatter keys to final pass positions.
         @inbounds for i in rangemin:rangemax
             rank_idx = tile_base + i - rangemin + 1
             bucket = _radix_bucket(src[i], Pass)
@@ -392,6 +391,7 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
     # For sortperm, this implementation treats permutation indices as values.
     #
     # CCCL reference code:
+    # CCCL source lines: 669-683
     #
     #   AgentRadixSortOnesweep(...,
     #       d_bins_out, d_bins_in,
@@ -426,6 +426,7 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
     # keys_out/values_out shared arrays, global_offsets, and block_idx.
     #
     # CCCL reference code:
+    # CCCL source lines: 177-190
     #
     #   struct TempStorage_ {
     #       union {
@@ -451,19 +452,20 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
 
     while true
         # ####################################################
-        # 1. Tile claim phase:
-        # Dynamically claim one tile id from the global counter.
-        # The claimed tile is the work unit corresponding to one CCCL block; the
-        # current execution unit processes that tile through all phases below.
+        # 1. Agent construction before Process(): claim the tile.
+        # CUB obtains block_idx in AgentRadixSortOnesweep constructor, then
+        # calls Process() for that claimed tile. This loop repeats the same
+        # constructor+Process unit until no tiles remain.
         #
         # CCCL equivalent:
-        # AgentRadixSortOnesweep constructor:
+        # AgentRadixSortOnesweep constructor prepares the Process() inputs:
         #
         #   lane 0 atomically increments d_ctrs
         #   the claimed block_idx is shared with the whole block
         #   full_block is computed from block_idx and TILE_ITEMS
         #
         # CCCL reference code:
+        # CCCL source lines: 699-708
         #
         #   if (threadIdx.x == 0) {
         #       s.block_idx = atomicAdd(d_ctrs, 1);
@@ -471,6 +473,8 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         #   __syncthreads();
         #   block_idx = s.block_idx;
         #   full_block = (block_idx + 1) * TILE_ITEMS <= num_items;
+
+        # Claim one tile from the global counter.
         new = Atomix.@atomic tile_counter[1] += one(UInt32)
         tile_id = Int(new - UInt32(1))
         tile_id < ntiles || break
@@ -480,18 +484,18 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         rangemax = min(rangemin + TileSize - 1, nelems)
 
         # ####################################################
-        # 2. Local histogram phase:
-        # Load the claimed tile and compute its local radix histogram.
-        # In CCCL the bin counts are produced by RankKeys through
-        # CountsCallback; this implementation materializes the count portion
-        # before rank construction.
+        # 2. Process(): LoadKeys, then RankKeys count path.
+        # CUB loads the tile into per-thread key arrays and enters RankKeys.
+        # RankKeys produces bins through CountsCallback; this implementation
+        # materializes the same bin counts before building ranks.
         #
         # CCCL equivalent:
-        # Process() first calls LoadKeys(block_idx * TILE_ITEMS, keys),
-        # then BlockRadixRankT::RankKeys computes both bins and ranks. This
-        # implementation splits the bin-count portion out explicitly.
+        # Process() calls LoadKeys(block_idx * TILE_ITEMS, keys), then
+        # BlockRadixRankT::RankKeys(... CountsCallback(...)). The count portion
+        # corresponds to the bins later passed to LookbackPartial/LookbackGlobal.
         #
         # CCCL reference code:
+        # CCCL source lines: 642-650
         #
         #   bit_ordered_type keys[ITEMS_PER_THREAD];
         #   LoadKeys(block_idx * TILE_ITEMS, keys);
@@ -499,11 +503,14 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         #       .RankKeys(keys, ranks, digit_extractor(),
         #                 exclusive_digit_prefix,
         #                 CountsCallback(*this, bins, keys));
+
+        # Clear local bucket counts for this tile.
         @inbounds for bucket in 1:256
             idx = _worker_bucket_index(worker_id, bucket)
             local_counts[idx] = zero(UInt32)
         end
 
+        # Count tile items by radix bucket.
         @inbounds for i in rangemin:rangemax
             bucket = _radix_bucket(src[i], Pass)
             idx = _worker_bucket_index(worker_id, bucket)
@@ -511,21 +518,24 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         end
 
         # ####################################################
-        # 3. Partial lookback publish phase:
-        # Publish this tile's local counts as PARTIAL lookback entries.
-        # Later tiles can consume these entries while resolving decoupled
-        # lookback prefixes for each radix bucket.
+        # 3. Process(): CountsCallback -> LookbackPartial.
+        # During RankKeys, CUB invokes CountsCallback after the per-tile bin
+        # counts are known. The callback publishes PARTIAL lookback entries
+        # before the pass resolves global offsets.
         #
         # CCCL equivalent:
-        # CountsCallback waits for lookback initialization, then calls
-        # LookbackPartial(bins), which stores a PARTIAL-masked bin count
-        # into d_lookback[block_idx, bin].
+        # CountsCallback copies RankKeys' other_bins into bins, calls
+        # LookbackPartial(bins), and then may try CUB's short-circuit fast path.
+        # This implementation mirrors the required PARTIAL publication.
         #
         # CCCL reference code:
+        # CCCL source lines: 233-247
         #
         #   AtomicOffsetT& loc = d_lookback[block_idx * RADIX_DIGITS + bin];
         #   PortionOffsetT value = bins[u] | LOOKBACK_PARTIAL_MASK;
         #   ThreadStore(&loc, value);
+
+        # Publish this tile's bucket counts as PARTIAL entries.
         @inbounds for bucket in 1:256
             idx_wb = _worker_bucket_index(worker_id, bucket)
             count = local_counts[idx_wb]
@@ -534,21 +544,19 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         end
 
         # ####################################################
-        # 4. Local radix rank phase:
-        # Compute the tile-local exclusive digit prefix and each item's 0-based
-        # rank in bucket-sorted tile order.
-        # CCCL produces both values in one BlockRadixRankT::RankKeys call; this
-        # implementation stores the prefix in local_offsets and ranks in
-        # local_ranks.
+        # 4. Process(): RankKeys rank output and ScatterKeysShared equivalent.
+        # CUB's same RankKeys call also returns exclusive_digit_prefix and
+        # ranks. Process() then uses ScatterKeysShared(keys, ranks) to stage
+        # tile-ordered keys in shared memory. This implementation keeps
+        # local_offsets/local_ranks and scatters directly from src.
         #
         # CCCL equivalent:
-        # BlockRadixRankT::RankKeys returns exclusive_digit_prefix and
-        # writes ranks[ITEMS_PER_THREAD]. Process() then uses
-        # ScatterKeysShared(keys, ranks) before the global scatter. This
-        # implementation stores the tile-local ranks in local_ranks and
-        # scatters directly from the active source buffer.
+        # BlockRadixRankT::RankKeys returns exclusive_digit_prefix and ranks.
+        # The following ScatterKeysShared step is represented here by retaining
+        # local_ranks rather than physically staging keys in shared memory.
         #
         # CCCL reference code:
+        # CCCL source lines: 645-654
         #
         #   int exclusive_digit_prefix[BINS_PER_THREAD];
         #   int ranks[ITEMS_PER_THREAD];
@@ -558,6 +566,8 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         #                 CountsCallback(*this, bins, keys));
         #   __syncthreads();
         #   ScatterKeysShared(keys, ranks);
+
+        # Build exclusive bucket offsets and stable local ranks.
         running = zero(UInt32)
 
         @inbounds for bucket in 1:256
@@ -580,11 +590,10 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         end
 
         # ####################################################
-        # 5. Global offset lookback phase:
-        # Resolve per-bucket global scatter offsets through the decoupled
-        # lookback table.
-        # For each bucket, accumulate same-bucket counts from earlier tiles until
-        # a GLOBAL prefix entry is found, then publish this tile's GLOBAL prefix.
+        # 5. Process(): LoadBinsToOffsetsGlobal -> LookbackGlobal -> UpdateBinsGlobal.
+        # This is the decoupled lookback part of OneSweep. It combines the
+        # pass-wide bucket base, this tile's exclusive_digit_prefix, and previous
+        # tiles' same-bucket counts to produce global_offsets.
         #
         # CCCL equivalent:
         # Process() calls:
@@ -600,6 +609,7 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         # previous-block contribution into s.global_offsets[bin].
         #
         # CCCL reference code:
+        # CCCL source lines: 276-311, 461-490
         #
         #   LoadBinsToOffsetsGlobal(offsets):
         #       s.global_offsets[bin] = d_bins_in[bin] - offsets[u];
@@ -614,10 +624,14 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         #       ThreadStore(&d_lookback[block_idx * RADIX_DIGITS + bin],
         #                   inc_sum | LOOKBACK_GLOBAL_MASK);
         #       s.global_offsets[bin] += inc_sum - bins[u];
+
+        # Resolve each bucket's global scatter base.
         @inbounds for bucket in 1:256
             previous = zero(UInt32)
 
             prev_tile = tile_id - 1
+
+            # Walk backward until a GLOBAL prefix is found.
             while prev_tile >= 0
                 idx = _lookback_index(prev_tile, bucket)
 
@@ -655,23 +669,27 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         end
 
         # ####################################################
-        # 6. Global scatter phase:
-        # Scatter keys and permutation values to the same output slot.
-        # The only semantic difference from key-only sorting is the additional
-        # value scatter that follows the same digit-derived global position.
+        # 6. Process(): ScatterKeysGlobal, then GatherScatterValues.
+        # CUB scatters keys first, then for key-value sorting gathers values,
+        # scatters them through shared memory by ranks, and writes them to the
+        # same digit-derived positions. This implementation writes the
+        # permutation value next to the key at the computed final index.
         #
         # CCCL equivalent:
-        # ScatterKeysGlobal writes keys, and GatherScatterValues loads values,
-        # scatters them through shared memory by ranks, then writes values to
-        # d_values_out at the same digit-derived global positions.
+        # ScatterKeysGlobal writes keys. GatherScatterValues loads values,
+        # scatters them by ranks through shared memory, then ScatterValuesGlobal
+        # writes d_values_out at the same digit-derived global positions.
         #
         # CCCL reference code:
+        # CCCL source lines: 614-630, 663
         #
         #   ScatterKeysGlobal();
         #   LoadValues(block_idx * TILE_ITEMS, values);
         #   ScatterValuesShared(values, ranks);
         #   ScatterValuesGlobal(digits);
         #   d_values_out[global_idx] = value;
+
+        # Scatter keys and permutation indices to final pass positions.
         @inbounds for i in rangemin:rangemax
             rank_idx = tile_base + i - rangemin + 1
             bucket = _radix_bucket(src[i], Pass)
