@@ -22,7 +22,7 @@ function _load_keys_and_count_digits! end
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function _load_keys_and_count_digits!(src :: KeyV, local_counts, rangemin :: Int, tile_len :: Int, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, Pass}
+        @inline function _load_keys_and_count_digits!(src :: KeyV, local_counts :: SharedV, rangemin :: Int, tile_len :: Int, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, SharedV <: MtlDeviceVector{UInt32}, Pass}
             lane_id = Int(Metal.thread_position_in_threadgroup().x)
             nlanes = Int(Metal.threads_per_threadgroup().x)
             local_i = lane_id

@@ -24,7 +24,7 @@ function _scatter_keys_global! end
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function _scatter_keys_global!(src :: KeyV, dst :: KeyV, global_offsets :: OffsetV, local_ranks :: OffsetV, rangemin :: Int, tile_len :: Int, :: Val{Pass}) where {KeyV <: CuDeviceVector{$KeyT}, OffsetV <: CuDeviceVector{UInt32}, Pass}
+        @inline function _scatter_keys_global!(src :: KeyV, dst :: KeyV, global_offsets :: SharedV, local_ranks :: SharedV, rangemin :: Int, tile_len :: Int, :: Val{Pass}) where {KeyV <: CuDeviceVector{$KeyT}, SharedV <: CuDeviceVector{UInt32}, Pass}
             thread_id = Int(CUDA.threadIdx().x)
             nthreads = Int(CUDA.blockDim().x)
             local_i = thread_id

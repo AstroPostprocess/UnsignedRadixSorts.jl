@@ -24,7 +24,7 @@ CUB parallel: this combines `LoadBinsToOffsetsGlobal`,
 - `tile_id`: 0-based tile id claimed by the threadgroup.
 - `::Val{Pass}`: Compile-time 1-based radix pass selector.
 """
-@inline function _resolve_lookback_global_offsets!(lookback :: OffsetV, bucket_offsets :: OffsetV, local_counts, local_offsets, global_offsets, tile_id :: Int, :: Val{Pass}) where {OffsetV <: MtlDeviceVector{UInt32}, Pass}
+@inline function _resolve_lookback_global_offsets!(lookback :: OffsetV, bucket_offsets :: OffsetV, local_counts :: SharedV, local_offsets :: SharedV, global_offsets :: SharedV, tile_id :: Int, :: Val{Pass}) where {OffsetV <: MtlDeviceVector{UInt32}, SharedV <: MtlDeviceVector{UInt32}, Pass}
     lane_id = Int(Metal.thread_position_in_threadgroup().x)
     nlanes = Int(Metal.threads_per_threadgroup().x)
 

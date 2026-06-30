@@ -24,7 +24,7 @@ function _scatter_keys_global! end
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function _scatter_keys_global!(src :: KeyV, dst :: KeyV, global_offsets, local_ranks, rangemin :: Int, tile_len :: Int, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, Pass}
+        @inline function _scatter_keys_global!(src :: KeyV, dst :: KeyV, global_offsets :: SharedV, local_ranks :: SharedV, rangemin :: Int, tile_len :: Int, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, SharedV <: MtlDeviceVector{UInt32}, Pass}
             lane_id = Int(Metal.thread_position_in_threadgroup().x)
             nlanes = Int(Metal.threads_per_threadgroup().x)
             local_i = lane_id

@@ -20,7 +20,7 @@ storage used for `bins`, `exclusive_digit_prefix`, rank cursors, and
 - `rank_cursors`: Threadgroup-memory cursors used while assigning stable local ranks; overwritten with zeros.
 - `global_offsets`: Threadgroup-memory global scatter bases; overwritten with zeros.
 """
-@inline function _clear_tile_storage!(local_counts, local_offsets, rank_cursors, global_offsets)
+@inline function _clear_tile_storage!(local_counts :: SharedV, local_offsets :: SharedV, rank_cursors :: SharedV, global_offsets :: SharedV) where {SharedV <: MtlDeviceVector{UInt32}}
     lane_id = Int(Metal.thread_position_in_threadgroup().x)
     nlanes = Int(Metal.threads_per_threadgroup().x)
 

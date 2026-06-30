@@ -15,7 +15,7 @@ running `Process()` for that tile.
 - `tile_counter`: Length-one Metal pass counter mutated atomically.
 - `claimed_tile`: Threadgroup-memory scalar used to broadcast the claimed tile id.
 """
-@inline function _claim_next_tile!(tile_counter :: OffsetV, claimed_tile) where {OffsetV <: MtlDeviceVector{UInt32}}
+@inline function _claim_next_tile!(tile_counter :: OffsetV, claimed_tile :: SharedV) where {OffsetV <: MtlDeviceVector{UInt32}, SharedV <: MtlDeviceVector{UInt32}}
     lane_id = Int(Metal.thread_position_in_threadgroup().x)
 
     if lane_id == 1

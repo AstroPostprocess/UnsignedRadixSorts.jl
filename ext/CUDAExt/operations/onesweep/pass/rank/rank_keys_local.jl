@@ -48,7 +48,7 @@ function _rank_keys_local! end
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function _rank_keys_local!(src :: KeyV, local_counts :: OffsetV, local_offsets :: OffsetV, rank_cursors :: OffsetV, local_ranks :: OffsetV, warp_offsets :: OffsetV, rangemin :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: CuDeviceVector{$KeyT}, OffsetV <: CuDeviceVector{UInt32}, TileSize, Pass}
+        @inline function _rank_keys_local!(src :: KeyV, local_counts :: SharedV, local_offsets :: SharedV, rank_cursors :: SharedV, local_ranks :: SharedV, warp_offsets :: SharedV, rangemin :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: CuDeviceVector{$KeyT}, SharedV <: CuDeviceVector{UInt32}, TileSize, Pass}
             thread_id = Int(CUDA.threadIdx().x)
             nthreads = Int(CUDA.blockDim().x)
 
@@ -85,11 +85,13 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # 256 bucket counts into `local_offsets`.
             scan_base_idx = 256
 
+            # Reset the carry between scan chunks.
             if thread_id == 1
                 @inbounds rank_cursors[scan_base_idx] = zero(UInt32)
             end
             CUDA.sync_threads()
 
+            # Scan bucket counts into exclusive offsets chunk by chunk.
             chunk_start = 0
             while chunk_start < 256
                 bucket = chunk_start + thread_id
@@ -102,6 +104,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
 
                 inclusive = count
 
+                # Scan counts within each warp.
                 offset = 1
                 while offset < warp_threads
                     addend = CUDA.shfl_up_sync(full_mask, inclusive, offset)
@@ -111,6 +114,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                     offset <<= 1
                 end
 
+                # Save each warp's chunk total.
                 if warp_lane_id == warp_threads
                     @inbounds rank_cursors[warp_id + 1] = inclusive
                 end
@@ -124,6 +128,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
 
                 warp_prefix = warp_total
 
+                # Scan warp totals to get per-warp prefixes.
                 if warp_id == 0
                     offset = 1
                     while offset < warp_threads
@@ -143,10 +148,12 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 @inbounds scan_base = rank_cursors[scan_base_idx]
                 @inbounds warp_prefix = rank_cursors[warp_id + 1]
 
+                # Write this bucket's exclusive digit prefix.
                 if valid_bucket
                     @inbounds local_offsets[bucket] = scan_base + warp_prefix + inclusive - count
                 end
 
+                # Carry this chunk's total into the next chunk.
                 if bucket == min(chunk_start + nthreads, 256)
                     @inbounds rank_cursors[scan_base_idx] = scan_base + warp_prefix + inclusive
                 end
@@ -166,6 +173,8 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # prefixes are known. `warp_offsets` is first used as
             # warp_offsets[warp, bucket] = count, so each warp can later receive
             # a bucket-local cursor range.
+
+            # Clear per-warp bucket counters.
             idx = thread_id
             while idx <= max_block_warps * 256
                 @inbounds warp_offsets[idx] = zero(UInt32)
@@ -173,6 +182,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             end
             CUDA.sync_threads()
 
+            # Count tile items by warp and bucket.
             item = 0
             while item < keys_per_thread
                 local_j = warp_id * warp_threads * keys_per_thread + item * warp_threads + lane_in_warp + 1
@@ -198,6 +208,8 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # starts from `exclusive_digit_prefix[bucket]`; each warp receives
             # the running cursor for that bucket, then the running value is
             # advanced by that warp's count.
+
+            # Turn per-warp counts into per-warp bucket cursors.
             bucket = thread_id
             while bucket <= 256
                 @inbounds running = local_offsets[bucket]
@@ -228,6 +240,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # then each lane adds its peer-local prefix.
             lane_mask_lt = CUDA.lanemask(<)
 
+            # Rank warp-striped items within each bucket.
             item = 0
             while item < keys_per_thread
                 local_j = warp_id * warp_threads * keys_per_thread + item * warp_threads + lane_in_warp + 1
@@ -246,6 +259,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 peer_mask = UInt32(0)
                 src_lane = 1
 
+                # Rebuild match_any by comparing lanes' digits.
                 while src_lane <= warp_threads
                     peer_digit = CUDA.shfl_sync(full_mask, digit, src_lane)
                     peer_valid = CUDA.shfl_sync(full_mask, valid_flag, src_lane)
@@ -262,6 +276,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 peer_digit_prefix = UInt32(CUDA.popc(peer_mask & lane_mask_lt))
                 warp_prefix = zero(UInt32)
 
+                # Advance the bucket cursor once per peer group.
                 if valid && warp_lane_id == Int(leader_lane)
                     idx = warp_id * 256 + bucket
                     warp_prefix = CUDA.atomic_add!(pointer(warp_offsets, idx), digit_count)
@@ -269,6 +284,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
 
                 warp_prefix = CUDA.shfl_sync(full_mask, warp_prefix, leader_lane)
 
+                # Store the final tile-local rank.
                 if valid
                     @inbounds local_ranks[local_j] = warp_prefix + peer_digit_prefix
                 end

@@ -17,7 +17,7 @@ publication of per-tile `bins`.
 - `local_counts`: Shared-memory bucket counts to publish.
 - `tile_id`: 0-based tile id claimed by the block.
 """
-@inline function _publish_lookback_partial!(lookback :: OffsetV, local_counts :: OffsetV, tile_id :: Int) where {OffsetV <: CuDeviceVector{UInt32}}
+@inline function _publish_lookback_partial!(lookback :: OffsetV, local_counts :: SharedV, tile_id :: Int) where {OffsetV <: CuDeviceVector{UInt32}, SharedV <: CuDeviceVector{UInt32}}
     thread_id = Int(CUDA.threadIdx().x)
     nthreads = Int(CUDA.blockDim().x)
 

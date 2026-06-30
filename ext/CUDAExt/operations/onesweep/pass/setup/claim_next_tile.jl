@@ -15,7 +15,7 @@ running `Process()` for that tile.
 - `tile_counter`: Length-one CUDA pass counter mutated atomically.
 - `claimed_tile`: Shared-memory scalar used to broadcast the claimed tile id.
 """
-@inline function _claim_next_tile!(tile_counter :: OffsetV, claimed_tile :: SharedOffsetV) where {OffsetV <: CuDeviceVector{UInt32}, SharedOffsetV <: CuDeviceVector{UInt32}}
+@inline function _claim_next_tile!(tile_counter :: OffsetV, claimed_tile :: SharedV) where {OffsetV <: CuDeviceVector{UInt32}, SharedV <: CuDeviceVector{UInt32}}
     thread_id = Int(CUDA.threadIdx().x)
 
     if thread_id == 1

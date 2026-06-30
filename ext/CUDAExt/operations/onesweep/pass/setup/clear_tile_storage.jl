@@ -18,7 +18,7 @@ storage used for `bins`, `exclusive_digit_prefix`, rank cursors, and
 - `rank_cursors`: Shared-memory cursors used while assigning stable local ranks; overwritten with zeros.
 - `global_offsets`: Shared-memory global scatter bases; overwritten with zeros.
 """
-@inline function _clear_tile_storage!(local_counts :: OffsetV, local_offsets :: OffsetV, rank_cursors :: OffsetV, global_offsets :: OffsetV) where {OffsetV <: CuDeviceVector{UInt32}}
+@inline function _clear_tile_storage!(local_counts :: SharedV, local_offsets :: SharedV, rank_cursors :: SharedV, global_offsets :: SharedV) where {SharedV <: CuDeviceVector{UInt32}}
     thread_id = Int(CUDA.threadIdx().x)
     nthreads = Int(CUDA.blockDim().x)
 

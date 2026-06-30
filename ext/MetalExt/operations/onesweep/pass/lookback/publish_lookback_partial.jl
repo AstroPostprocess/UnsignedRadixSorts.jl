@@ -17,7 +17,7 @@ publication of per-tile `bins`.
 - `local_counts`: Threadgroup-memory bucket counts to publish.
 - `tile_id`: 0-based tile id claimed by the threadgroup.
 """
-@inline function _publish_lookback_partial!(lookback :: OffsetV, local_counts, tile_id :: Int) where {OffsetV <: MtlDeviceVector{UInt32}}
+@inline function _publish_lookback_partial!(lookback :: OffsetV, local_counts :: SharedV, tile_id :: Int) where {OffsetV <: MtlDeviceVector{UInt32}, SharedV <: MtlDeviceVector{UInt32}}
     lane_id = Int(Metal.thread_position_in_threadgroup().x)
     nlanes = Int(Metal.threads_per_threadgroup().x)
 

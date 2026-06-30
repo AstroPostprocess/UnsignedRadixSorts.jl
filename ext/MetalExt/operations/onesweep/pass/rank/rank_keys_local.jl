@@ -48,7 +48,7 @@ function _rank_keys_local! end
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function _rank_keys_local!(src :: KeyV, local_counts, local_offsets, rank_cursors, local_ranks, simd_offsets, rangemin :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, TileSize, Pass}
+        @inline function _rank_keys_local!(src :: KeyV, local_counts :: SharedV, local_offsets :: SharedV, rank_cursors :: SharedV, local_ranks :: SharedV, simd_offsets :: SharedV, rangemin :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, SharedV <: MtlDeviceVector{UInt32}, TileSize, Pass}
             thread_id = Int(Metal.thread_position_in_threadgroup().x)
             nthreads = Int(Metal.threads_per_threadgroup().x)
 

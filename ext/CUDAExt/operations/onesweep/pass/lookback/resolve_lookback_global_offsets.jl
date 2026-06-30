@@ -24,7 +24,7 @@ CUB parallel: this combines `LoadBinsToOffsetsGlobal`,
 - `tile_id`: 0-based tile id claimed by the block.
 - `::Val{Pass}`: Compile-time 1-based radix pass selector.
 """
-@inline function _resolve_lookback_global_offsets!(lookback :: OffsetV, bucket_offsets :: OffsetV, local_counts :: OffsetV, local_offsets :: OffsetV, global_offsets :: OffsetV, tile_id :: Int, :: Val{Pass}) where {OffsetV <: CuDeviceVector{UInt32}, Pass}
+@inline function _resolve_lookback_global_offsets!(lookback :: OffsetV, bucket_offsets :: OffsetV, local_counts :: SharedV, local_offsets :: SharedV, global_offsets :: SharedV, tile_id :: Int, :: Val{Pass}) where {OffsetV <: CuDeviceVector{UInt32}, SharedV <: CuDeviceVector{UInt32}, Pass}
     thread_id = Int(CUDA.threadIdx().x)
     nthreads = Int(CUDA.blockDim().x)
 
