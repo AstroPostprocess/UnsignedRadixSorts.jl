@@ -1,7 +1,7 @@
 
 ## Local CCCL reference:
 ##
-##   temp/cccl_onesweep_sources/cccl/cub/cub/agent/agent_radix_sort_onesweep.cuh
+##   temp/cccl_onesweep/cub/cub/agent/agent_radix_sort_onesweep.cuh
 ##   detail::radix_sort::AgentRadixSortOnesweep
 ##
 ## CCCL Process() reference:
@@ -51,9 +51,8 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
     # Pass is a compile-time Val, so this branch is resolved by specialization.
     #
     # CCCL equivalent:
-    # AgentRadixSortOnesweep receives d_keys_in and d_keys_out after the
-    # dispatch layer has selected the active ping-pong buffers for this radix
-    # pass. Value pointers are null/ignored for keys-only sorting.
+    # AgentRadixSortOnesweep receives d_keys_in and d_keys_out after dispatch selects the active ping-pong buffers.
+    # Value pointers are null/ignored for keys-only sorting.
     #
     # CCCL reference code:
     # CCCL source lines: 669-683
@@ -63,13 +62,7 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
     #       d_keys_out, d_keys_in,
     #       nullptr, nullptr,
     #       num_items, current_bit, num_bits, decomposer);
-    if isodd(Pass)
-        src = codes
-        dst = ws.dst
-    else
-        src = ws.dst
-        dst = codes
-    end
+    src, dst = _select_pass_key_buffers(codes, ws, Val(Pass))
 
     nelems = length(src)
     ntiles = cld(nelems, TileSize)
@@ -109,9 +102,6 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
     rank_cursors   = ws.rank_cursors
     local_ranks    = ws.local_ranks
 
-    worker_id = _worker_id()
-    tile_base = TileSize * (worker_id - 1)
-
     while true
         # ####################################################
         # 1. Agent construction before Process(): claim the tile.
@@ -137,13 +127,13 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         #   full_block = (block_idx + 1) * TILE_ITEMS <= num_items;
 
         # Claim one tile from the global counter.
-        new = Atomix.@atomic tile_counter[1] += one(UInt32)
-        tile_id = Int(new - UInt32(1))
+        tile_id = _claim_next_tile!(tile_counter)
         tile_id < ntiles || break
 
         # Convert the 0-based tile id to a 1-based Julia range.
         rangemin = tile_id * TileSize + 1
         rangemax = min(rangemin + TileSize - 1, nelems)
+        tile_len = rangemax - rangemin + 1
 
         # ####################################################
         # 2. Process(): LoadKeys, then RankKeys count path.
@@ -166,19 +156,9 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         #                 exclusive_digit_prefix,
         #                 CountsCallback(*this, bins, keys));
 
-        # Clear local bucket counts for this tile.
-        @inbounds for bucket in 1:256
-            # Get the scratch-buffer index for this worker and bucket.
-            idx = _worker_bucket_index(worker_id, bucket)
-            local_counts[idx] = zero(UInt32)
-        end
-
-        # Count tile items by radix bucket.
-        @inbounds for i in rangemin:rangemax
-            bucket = _radix_bucket(src[i], Pass)
-            idx = _worker_bucket_index(worker_id, bucket)
-            local_counts[idx] += one(UInt32)
-        end
+        # Clear local bucket counts for this tile and count tile items by radix bucket.
+        _clear_tile_storage!(local_counts, local_offsets, rank_cursors, global_offsets)
+        _load_keys_and_count_digits!(src, local_counts, rangemin, tile_len, Val(Pass))
 
         # ####################################################
         # 3. Process(): CountsCallback -> LookbackPartial.
@@ -199,12 +179,7 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         #   ThreadStore(&loc, value);
 
         # Publish this tile's bucket counts as PARTIAL entries.
-        @inbounds for bucket in 1:256
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            count = local_counts[idx_wb]
-            idx = _lookback_index(tile_id, bucket)
-            Atomix.@atomic :release lookback[idx] = _partial_entry(count)
-        end
+        _publish_lookback_partial!(lookback, local_counts, tile_id)
 
         # ####################################################
         # 4. Process(): RankKeys rank output and ScatterKeysShared equivalent.
@@ -231,26 +206,7 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         #   ScatterKeysShared(keys, ranks);
 
         # Build exclusive bucket offsets and stable local ranks.
-        running = zero(UInt32)
-
-        @inbounds for bucket in 1:256
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            local_offsets[idx_wb] = running
-            running += local_counts[idx_wb]
-        end
-        @inbounds for bucket in 1:256
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            rank_cursors[idx_wb] = local_offsets[idx_wb]
-        end
-
-        @inbounds for i in rangemin:rangemax
-            rank_idx = tile_base + i - rangemin + 1
-            bucket = _radix_bucket(src[i], Pass)
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            rank = rank_cursors[idx_wb]
-            local_ranks[rank_idx] = rank
-            rank_cursors[idx_wb] = rank + one(UInt32)
-        end
+        _rank_keys_local!(src, local_counts, local_offsets, rank_cursors, local_ranks, rangemin, tile_len, Val(TileSize), Val(Pass))
 
         # ####################################################
         # 5. Process(): LoadBinsToOffsetsGlobal -> LookbackGlobal -> UpdateBinsGlobal.
@@ -289,58 +245,17 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         #       s.global_offsets[bin] += inc_sum - bins[u];
 
         # Resolve each bucket's global scatter base.
-        @inbounds for bucket in 1:256
-            previous = zero(UInt32)
-
-            prev_tile = tile_id - 1
-
-            # Walk backward until a GLOBAL prefix is found.
-            while prev_tile >= 0
-                idx = _lookback_index(prev_tile, bucket)
-
-                entry = Atomix.@atomic :acquire lookback[idx]
-
-                # Wait until the previous tile has published either a PARTIAL
-                # count or a GLOBAL prefix.
-                while entry == zero(UInt32)
-                    entry = Atomix.@atomic :acquire lookback[idx]
-                end
-
-                previous += _entry_count(entry)
-
-                if _is_global_entry(entry)
-                    break
-                end
-
-                prev_tile -= 1
-            end
-
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            local_count = local_counts[idx_wb]
-
-            # This tile's actual scatter base for this bucket:
-            #
-            #   global_offsets[bucket] =
-            #       bucket_start + previous - local_offsets[bucket]
-            # bucket_start is the pass-wide start of this bucket.
-            idx_bo = _bucket_offsets_index(Pass, bucket)
-            global_offsets[idx_wb] = bucket_offsets[idx_bo] + previous - local_offsets[idx_wb]
-
-            # Update this tile's lookback entry from PARTIAL to GLOBAL.
-            idx_l = _lookback_index(tile_id, bucket)
-            Atomix.@atomic :release lookback[idx_l] = _global_entry(previous + local_count)
-        end
+        _resolve_lookback_global_offsets!(lookback, bucket_offsets, local_counts, local_offsets, global_offsets, tile_id, Val(Pass))
 
         # ####################################################
         # 6. Process(): ScatterKeysGlobal.
         # CUB scatters from s.keys_out using idx + s.global_offsets[Digit(key)].
-        # Since this implementation did not stage keys in s.keys_out, it
-        # computes the same final index from local_ranks and writes directly
-        # from src.
+        # Since this implementation did not stage keys in s.keys_out, it computes the same final index from local_ranks.
+        # The write goes directly from src to the pass output.
         #
         # CCCL equivalent:
-        # ScatterKeysGlobal computes a per-item global index from the tile item
-        # rank plus s.global_offsets[Digit(key)], then writes to d_keys_out.
+        # ScatterKeysGlobal computes a per-item global index from the tile item rank plus s.global_offsets[Digit(key)].
+        # It then writes the key to d_keys_out.
         # Keys-only Process() stops here; GatherScatterValues is a no-op.
         #
         # CCCL reference code:
@@ -352,14 +267,7 @@ function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT, KeyV
         #   d_keys_out[global_idx] = Twiddle::Out(key, decomposer);
 
         # Scatter keys to final pass positions.
-        @inbounds for i in rangemin:rangemax
-            rank_idx = tile_base + i - rangemin + 1
-            bucket = _radix_bucket(src[i], Pass)
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            scatter_idx = global_offsets[idx_wb] + local_ranks[rank_idx]
-            dst[Int(scatter_idx)] = src[i]
-        end
-
+        _scatter_keys_global!(src, dst, global_offsets, local_ranks, rangemin, tile_len, Val(TileSize), Val(Pass))
     end
     
     return nothing
@@ -383,8 +291,8 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
 
     # ####################################################
     # Select source/output buffers and bucket-offset buffers for this pass.
-    # Same ping-pong rule as the key-only pass, plus the matching permutation
-    # buffers. The permutation value follows the key through every pass.
+    # Same ping-pong rule as the key-only pass, plus matching permutation buffers.
+    # The permutation value follows the key through every pass.
     #
     # CCCL equivalent:
     # AgentRadixSortOnesweep receives both key and value input/output pointers.
@@ -398,17 +306,7 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
     #       d_keys_out, d_keys_in,
     #       d_values_out, d_values_in,
     #       num_items, current_bit, num_bits, decomposer);
-    if isodd(Pass)
-        src = codes
-        dst = ws.dst
-        perm_src = ws.perms[1]
-        perm_dst = ws.perms[2]
-    else
-        src = ws.dst
-        dst = codes
-        perm_src = ws.perms[2]
-        perm_dst = ws.perms[1]
-    end
+    src, dst, perm_src, perm_dst = _select_pass_key_value_buffers(codes, ws, Val(Pass))
 
     nelems = length(src)
     ntiles = cld(nelems, TileSize)
@@ -447,9 +345,6 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
     rank_cursors   = ws.rank_cursors
     local_ranks    = ws.local_ranks
 
-    worker_id = _worker_id()
-    tile_base = TileSize * (worker_id - 1)
-
     while true
         # ####################################################
         # 1. Agent construction before Process(): claim the tile.
@@ -475,13 +370,13 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         #   full_block = (block_idx + 1) * TILE_ITEMS <= num_items;
 
         # Claim one tile from the global counter.
-        new = Atomix.@atomic tile_counter[1] += one(UInt32)
-        tile_id = Int(new - UInt32(1))
+        tile_id = _claim_next_tile!(tile_counter)
         tile_id < ntiles || break
 
         # Convert the 0-based tile id to a 1-based Julia range.
         rangemin = tile_id * TileSize + 1
         rangemax = min(rangemin + TileSize - 1, nelems)
+        tile_len = rangemax - rangemin + 1
 
         # ####################################################
         # 2. Process(): LoadKeys, then RankKeys count path.
@@ -504,18 +399,9 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         #                 exclusive_digit_prefix,
         #                 CountsCallback(*this, bins, keys));
 
-        # Clear local bucket counts for this tile.
-        @inbounds for bucket in 1:256
-            idx = _worker_bucket_index(worker_id, bucket)
-            local_counts[idx] = zero(UInt32)
-        end
-
-        # Count tile items by radix bucket.
-        @inbounds for i in rangemin:rangemax
-            bucket = _radix_bucket(src[i], Pass)
-            idx = _worker_bucket_index(worker_id, bucket)
-            local_counts[idx] += one(UInt32)
-        end
+        # Clear local bucket counts for this tile and count tile items by radix bucket.
+        _clear_tile_storage!(local_counts, local_offsets, rank_cursors, global_offsets)
+        _load_keys_and_count_digits!(src, local_counts, rangemin, tile_len, Val(Pass))
 
         # ####################################################
         # 3. Process(): CountsCallback -> LookbackPartial.
@@ -536,12 +422,7 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         #   ThreadStore(&loc, value);
 
         # Publish this tile's bucket counts as PARTIAL entries.
-        @inbounds for bucket in 1:256
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            count = local_counts[idx_wb]
-            idx = _lookback_index(tile_id, bucket)
-            Atomix.@atomic :release lookback[idx] = _partial_entry(count)
-        end
+        _publish_lookback_partial!(lookback, local_counts, tile_id)
 
         # ####################################################
         # 4. Process(): RankKeys rank output and ScatterKeysShared equivalent.
@@ -568,26 +449,7 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         #   ScatterKeysShared(keys, ranks);
 
         # Build exclusive bucket offsets and stable local ranks.
-        running = zero(UInt32)
-
-        @inbounds for bucket in 1:256
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            local_offsets[idx_wb] = running
-            running += local_counts[idx_wb]
-        end
-        @inbounds for bucket in 1:256
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            rank_cursors[idx_wb] = local_offsets[idx_wb]
-        end
-
-        @inbounds for i in rangemin:rangemax
-            rank_idx = tile_base + i - rangemin + 1
-            bucket = _radix_bucket(src[i], Pass)
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            rank = rank_cursors[idx_wb]
-            local_ranks[rank_idx] = rank
-            rank_cursors[idx_wb] = rank + one(UInt32)
-        end
+        _rank_keys_local!(src, local_counts, local_offsets, rank_cursors, local_ranks, rangemin, tile_len, Val(TileSize), Val(Pass))
 
         # ####################################################
         # 5. Process(): LoadBinsToOffsetsGlobal -> LookbackGlobal -> UpdateBinsGlobal.
@@ -626,59 +488,16 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         #       s.global_offsets[bin] += inc_sum - bins[u];
 
         # Resolve each bucket's global scatter base.
-        @inbounds for bucket in 1:256
-            previous = zero(UInt32)
-
-            prev_tile = tile_id - 1
-
-            # Walk backward until a GLOBAL prefix is found.
-            while prev_tile >= 0
-                idx = _lookback_index(prev_tile, bucket)
-
-                entry = Atomix.@atomic :acquire lookback[idx]
-
-                # Wait until the previous tile has published either a PARTIAL
-                # count or a GLOBAL prefix.
-                while entry == zero(UInt32)
-                    entry = Atomix.@atomic :acquire lookback[idx]
-                end
-
-                previous += _entry_count(entry)
-
-                if _is_global_entry(entry)
-                    break
-                end
-
-                prev_tile -= 1
-            end
-
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            local_count = local_counts[idx_wb]
-
-            # This tile's actual scatter base for this bucket:
-            #
-            #   global_offsets[bucket] =
-            #       bucket_start + previous - local_offsets[bucket]
-            # bucket_start is the pass-wide start of this bucket.
-            idx_bo = _bucket_offsets_index(Pass, bucket)
-            global_offsets[idx_wb] = bucket_offsets[idx_bo] + previous - local_offsets[idx_wb]
-
-            # Update this tile's lookback entry from PARTIAL to GLOBAL.
-            idx_l = _lookback_index(tile_id, bucket)
-            Atomix.@atomic :release lookback[idx_l] = _global_entry(previous + local_count)
-        end
+        _resolve_lookback_global_offsets!(lookback, bucket_offsets, local_counts, local_offsets, global_offsets, tile_id, Val(Pass))
 
         # ####################################################
         # 6. Process(): ScatterKeysGlobal, then GatherScatterValues.
-        # CUB scatters keys first, then for key-value sorting gathers values,
-        # scatters them through shared memory by ranks, and writes them to the
-        # same digit-derived positions. This implementation writes the
-        # permutation value next to the key at the computed final index.
+        # CUB scatters keys first, then gathers values, scatters them through shared memory by rank, and writes them out.
+        # This implementation writes the permutation value next to the key at the computed final index.
         #
         # CCCL equivalent:
-        # ScatterKeysGlobal writes keys. GatherScatterValues loads values,
-        # scatters them by ranks through shared memory, then ScatterValuesGlobal
-        # writes d_values_out at the same digit-derived global positions.
+        # ScatterKeysGlobal writes keys. GatherScatterValues loads values and scatters them by rank through shared memory.
+        # ScatterValuesGlobal then writes d_values_out at the same digit-derived global positions.
         #
         # CCCL reference code:
         # CCCL source lines: 614-630, 663
@@ -690,15 +509,7 @@ function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{KeyT,
         #   d_values_out[global_idx] = value;
 
         # Scatter keys and permutation indices to final pass positions.
-        @inbounds for i in rangemin:rangemax
-            rank_idx = tile_base + i - rangemin + 1
-            bucket = _radix_bucket(src[i], Pass)
-            idx_wb = _worker_bucket_index(worker_id, bucket)
-            scatter_idx = global_offsets[idx_wb] + local_ranks[rank_idx]
-            dst[Int(scatter_idx)] = src[i]
-            perm_dst[Int(scatter_idx)] = perm_src[i]
-        end
-
+        _scatter_key_values_global!(src, dst, perm_src, perm_dst, global_offsets, local_ranks, rangemin, tile_len, Val(TileSize), Val(Pass))
     end
     
     return nothing

@@ -1,6 +1,6 @@
 ## Local CCCL reference:
 ##
-##   temp/cccl_onesweep_sources/cccl/cub/cub/agent/agent_radix_sort_onesweep.cuh
+##   temp/cccl_onesweep/cub/cub/agent/agent_radix_sort_onesweep.cuh
 ##   detail::radix_sort::AgentRadixSortOnesweep
 ##
 ## CCCL Process() reference:
@@ -31,8 +31,7 @@
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt32}, TileSize, Pass}
-
+        @inline function onesweep_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: CuDeviceVector{$KeyT}, OffsetV <: CuDeviceVector{UInt32}, TileSize, Pass}
             lookback = ws.lookback
             tile_counter = ws.tile_counter
 
@@ -41,9 +40,8 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # Pass is a compile-time Val, so this branch is resolved by specialization.
             #
             # CCCL equivalent:
-            # AgentRadixSortOnesweep receives d_keys_in and d_keys_out after the
-            # dispatch layer has selected the active ping-pong buffers for this radix
-            # pass. Value pointers are null/ignored for keys-only sorting.
+            # AgentRadixSortOnesweep receives d_keys_in and d_keys_out after dispatch selects the active ping-pong buffers.
+            # Value pointers are null/ignored for keys-only sorting.
             #
             # CCCL reference code:
             # CCCL source lines: 669-683
@@ -53,21 +51,14 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             #       d_keys_out, d_keys_in,
             #       nullptr, nullptr,
             #       num_items, current_bit, num_bits, decomposer);
-            if isodd(Pass)
-                src = codes
-                dst = ws.dst
-            else
-                src = ws.dst
-                dst = codes
-            end
+            src, dst = _select_pass_key_buffers(codes, ws, Val(Pass))
 
             nelems = length(src)
             ntiles = cld(nelems, TileSize)
-
-            # bucket_offsets stores the pass-wide global start position for each radix bucket.
             bucket_offsets = ws.bucket_offsets
 
-            # Threadgroup-local equivalent of CUB agent temporary storage.
+            # ####################################################
+            # Block-local equivalent of CUB agent temporary storage.
             #
             # local_counts[bucket]   ~= CUB per-tile bins
             # local_offsets[bucket]  ~= exclusive_digit_prefix
@@ -93,15 +84,13 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             #           PortionOffsetT block_idx;
             #       };
             #   };
-            local_counts   = Metal.MtlThreadGroupArray(UInt32, 256)
-            local_offsets  = Metal.MtlThreadGroupArray(UInt32, 256)
-            rank_cursors   = Metal.MtlThreadGroupArray(UInt32, 256)
-            global_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
-            local_ranks    = Metal.MtlThreadGroupArray(UInt32, TileSize)
-            claimed_tile   = Metal.MtlThreadGroupArray(UInt32, 1)
-
-            lane_id = Int(Metal.thread_position_in_threadgroup().x)
-            nlanes  = Int(Metal.threads_per_threadgroup().x)
+            local_counts   = CUDA.CuStaticSharedArray(UInt32, 256)
+            local_offsets  = CUDA.CuStaticSharedArray(UInt32, 256)
+            rank_cursors   = CUDA.CuStaticSharedArray(UInt32, 256)
+            global_offsets = CUDA.CuStaticSharedArray(UInt32, 256)
+            local_ranks    = CUDA.CuStaticSharedArray(UInt32, TileSize)
+            warp_offsets   = CUDA.CuStaticSharedArray(UInt32, 8 * 256)
+            claimed_tile   = CUDA.CuStaticSharedArray(UInt32, 1)
 
             while true
                 # ####################################################
@@ -128,17 +117,10 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #   full_block = (block_idx + 1) * TILE_ITEMS <= num_items;
 
                 # Claim one tile from the global counter.
-                if lane_id == 1
-                    @inbounds claimed_tile[1] = Metal.atomic_fetch_add_explicit(pointer(tile_counter, 1), UInt32(1))
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
-
-                # Metal.atomic_fetch_add_explicit returns the old value, so the
-                # stored value is already the 0-based tile id.
-                @inbounds tile_id = Int(claimed_tile[1])
+                tile_id = _claim_next_tile!(tile_counter, claimed_tile)
                 tile_id < ntiles || break
 
-                # Convert 0-based tile id to Julia's 1-based input range.
+                # Convert the 0-based tile id to Julia's 1-based input range.
                 rangemin = tile_id * TileSize + 1
                 rangemax = min(rangemin + TileSize - 1, nelems)
                 tile_len = rangemax - rangemin + 1
@@ -164,28 +146,9 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #                 exclusive_digit_prefix,
                 #                 CountsCallback(*this, bins, keys));
 
-                # Clear per-bucket scratch for this tile.
-                bucket = lane_id
-                while bucket <= 256
-                    @inbounds begin
-                        local_counts[bucket] = zero(UInt32)
-                        local_offsets[bucket] = zero(UInt32)
-                        rank_cursors[bucket] = zero(UInt32)
-                        global_offsets[bucket] = zero(UInt32)
-                    end
-                    bucket += nlanes
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
-
-                # Count tile items by radix bucket.
-                local_i = lane_id
-                while local_i <= tile_len
-                    i = rangemin + local_i - 1
-                    @inbounds bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
-                    Metal.atomic_fetch_add_explicit(pointer(local_counts, bucket), UInt32(1))
-                    local_i += nlanes
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+                # Clear per-bucket scratch for this tile, then count tile items by radix bucket.
+                _clear_tile_storage!(local_counts, local_offsets, rank_cursors, global_offsets)
+                _load_keys_and_count_digits!(src, local_counts, rangemin, tile_len, Val(Pass))
 
                 # ####################################################
                 # 3. Process(): CountsCallback -> LookbackPartial.
@@ -206,15 +169,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #   ThreadStore(&loc, value);
 
                 # Publish this tile's bucket counts as PARTIAL entries.
-                bucket = lane_id
-                while bucket <= 256
-                    @inbounds count = local_counts[bucket]
-                    idx = UnsignedRadixSorts._lookback_index(tile_id, bucket)
-                    entry = UnsignedRadixSorts._partial_entry(count)
-                    Metal.atomic_store_explicit(pointer(lookback, idx), entry)
-                    bucket += nlanes
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+                _publish_lookback_partial!(lookback, local_counts, tile_id)
 
                 # ####################################################
                 # 4. Process(): RankKeys rank output and ScatterKeysShared equivalent.
@@ -241,23 +196,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #   ScatterKeysShared(keys, ranks);
 
                 # Build exclusive bucket offsets and stable local ranks.
-                if lane_id == 1
-                    running = zero(UInt32)
-                    @inbounds for bucket in 1:256
-                        local_offsets[bucket] = running
-                        rank_cursors[bucket] = running
-                        running += local_counts[bucket]
-                    end
-
-                    @inbounds for local_j in 1:tile_len
-                        i = rangemin + local_j - 1
-                        bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
-                        rank = rank_cursors[bucket]
-                        local_ranks[local_j] = rank
-                        rank_cursors[bucket] = rank + one(UInt32)
-                    end
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+                _rank_keys_local!(src, local_counts, local_offsets, rank_cursors, local_ranks, warp_offsets, rangemin, tile_len, Val(TileSize), Val(Pass))
 
                 # ####################################################
                 # 5. Process(): LoadBinsToOffsetsGlobal -> LookbackGlobal -> UpdateBinsGlobal.
@@ -296,58 +235,17 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #       s.global_offsets[bin] += inc_sum - bins[u];
 
                 # Resolve each bucket's global scatter base.
-                bucket = lane_id
-                while bucket <= 256
-                    previous = zero(UInt32)
-
-                    prev_tile = tile_id - 1
-
-                    # Walk backward until a GLOBAL prefix is found.
-                    while prev_tile >= 0
-                        idx = UnsignedRadixSorts._lookback_index(prev_tile, bucket)
-                        entry = Metal.atomic_load_explicit(pointer(lookback, idx))
-
-                        # Wait until the previous tile has published either a
-                        # PARTIAL count or a GLOBAL prefix.
-                        while entry == zero(UInt32)
-                            entry = Metal.atomic_load_explicit(pointer(lookback, idx))
-                        end
-
-                        previous += UnsignedRadixSorts._entry_count(entry)
-
-                        if UnsignedRadixSorts._is_global_entry(entry)
-                            break
-                        end
-
-                        prev_tile -= 1
-                    end
-
-                    @inbounds begin
-                        local_count = local_counts[bucket]
-                        # bucket_start is the pass-wide start of this bucket.
-                        bucket_start = bucket_offsets[UnsignedRadixSorts._bucket_offsets_index(Pass, bucket)]
-                        global_offsets[bucket] = bucket_start + previous - local_offsets[bucket]
-                    end
-
-                    # Upgrade this tile's lookback entry from PARTIAL to GLOBAL.
-                    idx_l = UnsignedRadixSorts._lookback_index(tile_id, bucket)
-                    global_entry = UnsignedRadixSorts._global_entry(previous + local_count)
-                    Metal.atomic_store_explicit(pointer(lookback, idx_l), global_entry)
-
-                    bucket += nlanes
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+                _resolve_lookback_global_offsets!(lookback, bucket_offsets, local_counts, local_offsets, global_offsets, tile_id, Val(Pass))
 
                 # ####################################################
                 # 6. Process(): ScatterKeysGlobal.
                 # CUB scatters from s.keys_out using idx + s.global_offsets[Digit(key)].
-                # Since this implementation did not stage keys in s.keys_out, it
-                # computes the same final index from local_ranks and writes directly
-                # from src.
+                # Since this implementation did not stage keys in s.keys_out, it computes the same final index from local_ranks.
+                # The write goes directly from src to the pass output.
                 #
                 # CCCL equivalent:
-                # ScatterKeysGlobal computes a per-item global index from the tile item
-                # rank plus s.global_offsets[Digit(key)], then writes to d_keys_out.
+                # ScatterKeysGlobal computes a per-item global index from the tile item rank plus s.global_offsets[Digit(key)].
+                # It then writes the key to d_keys_out.
                 # Keys-only Process() stops here; GatherScatterValues is a no-op.
                 #
                 # CCCL reference code:
@@ -359,32 +257,20 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #   d_keys_out[global_idx] = Twiddle::Out(key, decomposer);
 
                 # Scatter keys to final pass positions.
-                local_i = lane_id
-                while local_i <= tile_len
-                    i = rangemin + local_i - 1
-                    @inbounds begin
-                        bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
-                        scatter_idx = global_offsets[bucket] + local_ranks[local_i]
-                        dst[Int(scatter_idx)] = src[i]
-                    end
-                    local_i += nlanes
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+                _scatter_keys_global!(src, dst, global_offsets, local_ranks, rangemin, tile_len, Val(Pass))
             end
 
             return nothing
         end
 
-        @inline function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, OffsetV <: MtlDeviceVector{UInt32}, TileSize, Pass}
-
+        @inline function onesweep_perm_pass_kernel!(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: CuDeviceVector{$KeyT}, OffsetV <: CuDeviceVector{UInt32}, TileSize, Pass}
             lookback = ws.lookback
             tile_counter = ws.tile_counter
 
             # ####################################################
             # Select source/output buffers and bucket-offset buffers for this pass.
-            # Same ping-pong rule as the key-only pass, plus the matching
-            # permutation buffers. The permutation value follows the key through
-            # every pass, so the final returned buffer is the stable source order.
+            # Same ping-pong rule as the key-only pass, plus matching permutation buffers.
+            # The permutation value follows the key through every pass, so the final returned buffer is the stable source order.
             #
             # CCCL equivalent:
             # AgentRadixSortOnesweep receives both key and value input/output
@@ -399,24 +285,13 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             #       d_keys_out, d_keys_in,
             #       d_values_out, d_values_in,
             #       num_items, current_bit, num_bits, decomposer);
-            if isodd(Pass)
-                src = codes
-                dst = ws.dst
-                perm_src = ws.perms[1]
-                perm_dst = ws.perms[2]
-            else
-                src = ws.dst
-                dst = codes
-                perm_src = ws.perms[2]
-                perm_dst = ws.perms[1]
-            end
+            src, dst, perm_src, perm_dst = _select_pass_key_value_buffers(codes, ws, Val(Pass))
 
             nelems = length(src)
             ntiles = cld(nelems, TileSize)
-
-            # bucket_offsets stores the pass-wide global start position for each radix bucket.
             bucket_offsets = ws.bucket_offsets
 
+            # ####################################################
             # CUDA __shared__ equivalent. This is intentionally identical to
             # onesweep_pass_kernel!; sortperm only adds a second scatter store.
             #
@@ -438,15 +313,13 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             #           PortionOffsetT block_idx;
             #       };
             #   };
-            local_counts = Metal.MtlThreadGroupArray(UInt32, 256)
-            local_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
-            rank_cursors = Metal.MtlThreadGroupArray(UInt32, 256)
-            global_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
-            local_ranks = Metal.MtlThreadGroupArray(UInt32, TileSize)
-            claimed_tile = Metal.MtlThreadGroupArray(UInt32, 1)
-
-            lane_id = Int(Metal.thread_position_in_threadgroup().x)
-            nlanes = Int(Metal.threads_per_threadgroup().x)
+            local_counts = CUDA.CuStaticSharedArray(UInt32, 256)
+            local_offsets = CUDA.CuStaticSharedArray(UInt32, 256)
+            rank_cursors = CUDA.CuStaticSharedArray(UInt32, 256)
+            global_offsets = CUDA.CuStaticSharedArray(UInt32, 256)
+            local_ranks = CUDA.CuStaticSharedArray(UInt32, TileSize)
+            warp_offsets = CUDA.CuStaticSharedArray(UInt32, 8 * 256)
+            claimed_tile = CUDA.CuStaticSharedArray(UInt32, 1)
 
             while true
                 # ####################################################
@@ -473,14 +346,10 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #   full_block = (block_idx + 1) * TILE_ITEMS <= num_items;
 
                 # Claim one tile from the global counter.
-                if lane_id == 1
-                    @inbounds claimed_tile[1] = Metal.atomic_fetch_add_explicit(pointer(tile_counter, 1), UInt32(1))
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
-
-                @inbounds tile_id = Int(claimed_tile[1])
+                tile_id = _claim_next_tile!(tile_counter, claimed_tile)
                 tile_id < ntiles || break
 
+                # Convert the 0-based tile id to Julia's 1-based input range.
                 rangemin = tile_id * TileSize + 1
                 rangemax = min(rangemin + TileSize - 1, nelems)
                 tile_len = rangemax - rangemin + 1
@@ -506,28 +375,9 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #                 exclusive_digit_prefix,
                 #                 CountsCallback(*this, bins, keys));
 
-                # Clear per-bucket scratch for this tile.
-                bucket = lane_id
-                while bucket <= 256
-                    @inbounds begin
-                        local_counts[bucket] = zero(UInt32)
-                        local_offsets[bucket] = zero(UInt32)
-                        rank_cursors[bucket] = zero(UInt32)
-                        global_offsets[bucket] = zero(UInt32)
-                    end
-                    bucket += nlanes
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
-
-                # Count tile items by radix bucket.
-                local_i = lane_id
-                while local_i <= tile_len
-                    i = rangemin + local_i - 1
-                    @inbounds bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
-                    Metal.atomic_fetch_add_explicit(pointer(local_counts, bucket), UInt32(1))
-                    local_i += nlanes
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+                # Clear per-bucket scratch for this tile, then count tile items by radix bucket.
+                _clear_tile_storage!(local_counts, local_offsets, rank_cursors, global_offsets)
+                _load_keys_and_count_digits!(src, local_counts, rangemin, tile_len, Val(Pass))
 
                 # ####################################################
                 # 3. Process(): CountsCallback -> LookbackPartial.
@@ -548,15 +398,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #   ThreadStore(&loc, value);
 
                 # Publish this tile's bucket counts as PARTIAL entries.
-                bucket = lane_id
-                while bucket <= 256
-                    @inbounds count = local_counts[bucket]
-                    idx = UnsignedRadixSorts._lookback_index(tile_id, bucket)
-                    entry = UnsignedRadixSorts._partial_entry(count)
-                    Metal.atomic_store_explicit(pointer(lookback, idx), entry)
-                    bucket += nlanes
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+                _publish_lookback_partial!(lookback, local_counts, tile_id)
 
                 # ####################################################
                 # 4. Process(): RankKeys rank output and ScatterKeysShared equivalent.
@@ -583,23 +425,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #   ScatterKeysShared(keys, ranks);
 
                 # Build exclusive bucket offsets and stable local ranks.
-                if lane_id == 1
-                    running = zero(UInt32)
-                    @inbounds for bucket in 1:256
-                        local_offsets[bucket] = running
-                        rank_cursors[bucket] = running
-                        running += local_counts[bucket]
-                    end
-
-                    @inbounds for local_j in 1:tile_len
-                        i = rangemin + local_j - 1
-                        bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
-                        rank = rank_cursors[bucket]
-                        local_ranks[local_j] = rank
-                        rank_cursors[bucket] = rank + one(UInt32)
-                    end
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+                _rank_keys_local!(src, local_counts, local_offsets, rank_cursors, local_ranks, warp_offsets, rangemin, tile_len, Val(TileSize), Val(Pass))
 
                 # ####################################################
                 # 5. Process(): LoadBinsToOffsetsGlobal -> LookbackGlobal -> UpdateBinsGlobal.
@@ -638,56 +464,16 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #       s.global_offsets[bin] += inc_sum - bins[u];
 
                 # Resolve each bucket's global scatter base.
-                bucket = lane_id
-                while bucket <= 256
-                    previous = zero(UInt32)
-
-                    prev_tile = tile_id - 1
-
-                    # Walk backward until a GLOBAL prefix is found.
-                    while prev_tile >= 0
-                        idx = UnsignedRadixSorts._lookback_index(prev_tile, bucket)
-                        entry = Metal.atomic_load_explicit(pointer(lookback, idx))
-
-                        while entry == zero(UInt32)
-                            entry = Metal.atomic_load_explicit(pointer(lookback, idx))
-                        end
-
-                        previous += UnsignedRadixSorts._entry_count(entry)
-
-                        if UnsignedRadixSorts._is_global_entry(entry)
-                            break
-                        end
-
-                        prev_tile -= 1
-                    end
-
-                    @inbounds begin
-                        local_count = local_counts[bucket]
-                        # bucket_start is the pass-wide start of this bucket.
-                        bucket_start = bucket_offsets[UnsignedRadixSorts._bucket_offsets_index(Pass, bucket)]
-                        global_offsets[bucket] = bucket_start + previous - local_offsets[bucket]
-                    end
-
-                    idx_l = UnsignedRadixSorts._lookback_index(tile_id, bucket)
-                    global_entry = UnsignedRadixSorts._global_entry(previous + local_count)
-                    Metal.atomic_store_explicit(pointer(lookback, idx_l), global_entry)
-
-                    bucket += nlanes
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+                _resolve_lookback_global_offsets!(lookback, bucket_offsets, local_counts, local_offsets, global_offsets, tile_id, Val(Pass))
 
                 # ####################################################
                 # 6. Process(): ScatterKeysGlobal, then GatherScatterValues.
-                # CUB scatters keys first, then for key-value sorting gathers values,
-                # scatters them through shared memory by ranks, and writes them to the
-                # same digit-derived positions. This implementation writes the
-                # permutation value next to the key at the computed final index.
+                # CUB scatters keys first, then gathers values, scatters them through shared memory by rank, and writes them out.
+                # This implementation writes the permutation value next to the key at the computed final index.
                 #
                 # CCCL equivalent:
-                # ScatterKeysGlobal writes keys. GatherScatterValues loads values,
-                # scatters them by ranks through shared memory, then ScatterValuesGlobal
-                # writes d_values_out at the same digit-derived global positions.
+                # ScatterKeysGlobal writes keys. GatherScatterValues loads values and scatters them by rank through shared memory.
+                # ScatterValuesGlobal then writes d_values_out at the same digit-derived global positions.
                 #
                 # CCCL reference code:
                 # CCCL source lines: 614-630, 663
@@ -699,18 +485,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 #   d_values_out[global_idx] = value;
 
                 # Scatter keys and permutation indices to final pass positions.
-                local_i = lane_id
-                while local_i <= tile_len
-                    i = rangemin + local_i - 1
-                    @inbounds begin
-                        bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
-                        scatter_idx = global_offsets[bucket] + local_ranks[local_i]
-                        dst[Int(scatter_idx)] = src[i]
-                        perm_dst[Int(scatter_idx)] = perm_src[i]
-                    end
-                    local_i += nlanes
-                end
-                Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+                _scatter_key_values_global!(src, dst, perm_src, perm_dst, global_offsets, local_ranks, rangemin, tile_len, Val(Pass))
             end
 
             return nothing
