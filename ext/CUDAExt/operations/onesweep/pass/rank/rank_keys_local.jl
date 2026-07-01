@@ -1,300 +1,214 @@
+using StaticArrays: MVector
+
 ## CUDA BlockRadixRank-style local rank helper for OneSweep.
 ##
 ##   Upstream CCCL: cub/cub/block/block_radix_rank.cuh
 ##   cub::BlockRadixRankMatchEarlyCounts::RankKeys
 ##
-## This helper is the CUDA implementation of the OneSweep pass step:
+## This helper implements the OneSweep pass step:
 ##
 ##   BlockRadixRankT(s.rank_temp_storage)
 ##       .RankKeys(keys, ranks, digit_extractor(),
 ##                 exclusive_digit_prefix,
 ##                 CountsCallback(*this, bins, keys));
 ##
-## At this point `local_counts` already contains the CountCallback-style bins
-## for the tile. `_rank_keys_local!` performs the BRR work that turns those
-## bins into exclusive digit prefixes and stable tile-local ranks.
-##
 ## Outputs:
+## - `local_counts[bucket]`  ~= CUB `bins`
 ## - `local_offsets[bucket]` ~= CUB `exclusive_digit_prefix`
-## - `local_ranks[local_j]` ~= stable tile-local rank
+## - returned `ranks[item]`  ~= stable tile-local rank
 
 """
-    _rank_keys_local!(src, local_counts, local_offsets, rank_cursors, local_ranks, warp_offsets, rangemin, tile_len, ::Val{TileSize}, ::Val{Pass})
+    _rank_keys_early_counts!(keys, warp_offsets, local_counts, local_offsets, lookback, tile_id, tile_len, ::Val{TileSize}, ::Val{ThreadsPerBlock}, ::Val{Pass})
 
-Compute CUDA BlockRadixRank-style local prefixes and ranks for a tile.
+Compute stable tile-local ranks and early per-bucket counts from cached keys.
 
-`local_counts` is the per-tile digit histogram produced before
-`CountsCallback -> LookbackPartial`. This helper scans those counts into
-`local_offsets`, builds per-warp digit cursors in `warp_offsets`, and writes a
-stable tile-local rank for every valid tile item into `local_ranks`.
+The block may contain any whole number of CUDA warps up to 256 threads. Threads
+cooperatively own the 256 radix buckets in strided order, so configurations such
+as 64, 128, or 256 threads use the same algorithm.
 
-CUB parallel: `BlockRadixRankMatchEarlyCounts::RankKeys` with early counts
-already materialized.
+CUB parallel: `BlockRadixRankMatchEarlyCounts::RankKeys`. The counts callback
+is represented by the early `local_counts` reduction and
+`_publish_lookback_partial!` call inside this helper.
 
 # Parameters
 
-- `src`: Active source key buffer for this pass.
-- `local_counts`: Shared-memory tile digit counts, equivalent to CUB `bins`.
-- `local_offsets`: Shared-memory exclusive digit prefixes written in-place.
-- `rank_cursors`: Shared-memory scratch used by the prefix scan.
-- `local_ranks`: Shared-memory stable tile-local ranks written in-place.
-- `warp_offsets`: Shared-memory per-warp histogram/cursor scratch.
-- `rangemin`: First 1-based source index in the claimed tile.
-- `tile_len`: Number of valid items in the tile.
+- `keys`: Per-thread cached keys in warp-striped input order.
+- `warp_offsets`: Shared per-warp bucket counts, later overwritten with cursors.
+- `local_counts`: Shared tile counts for all 256 buckets.
+- `local_offsets`: Shared exclusive tile prefixes for all 256 buckets.
+- `lookback`: Packed global OneSweep lookback table.
+- `tile_id`: Current 0-based tile id.
+- `tile_len`: Number of valid keys in the tile.
 - `::Val{TileSize}`: Compile-time tile size.
-- `::Val{Pass}`: Compile-time 1-based radix pass selector.
+- `::Val{ThreadsPerBlock}`: Compile-time CUDA block size.
+- `::Val{Pass}`: Compile-time radix pass selector.
+
+# Returns
+
+- Per-thread stable tile-local ranks corresponding to `keys`.
 """
-function _rank_keys_local! end
+function _rank_keys_early_counts! end
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function _rank_keys_local!(src :: KeyV, local_counts :: SharedV, local_offsets :: SharedV, rank_cursors :: SharedV, local_ranks :: SharedV, warp_offsets :: SharedV, rangemin :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: CuDeviceVector{$KeyT}, SharedV <: CuDeviceVector{UInt32}, TileSize, Pass}
-            thread_id = Int(CUDA.threadIdx().x)
-            nthreads = Int(CUDA.blockDim().x)
+        @inline function _rank_keys_early_counts!(keys :: MVector{ItemsPerThread, $KeyT}, warp_offsets :: SharedV, local_counts :: SharedV, local_offsets :: SharedV, lookback :: OffsetV, tile_id :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{ThreadsPerBlock}, :: Val{Pass}) where {ItemsPerThread, SharedV <: CuDeviceVector{UInt32}, OffsetV <: CuDeviceVector{UInt32}, TileSize, ThreadsPerBlock, Pass}
+            NWarps = ThreadsPerBlock ÷ 32
 
-            # ####################################################
-            # RankKeys() setup: CUB prepares BlockRadixRank temp storage and
-            # warp/lane metadata before computing digit prefixes and ranks.
-            #
-            # CUB reference:
-            # - block_radix_rank.cuh lines 897-924: warp/lane setup
-            # - block_radix_rank.cuh lines 1137-1144: RankKeys entry setup
-            warp_threads = Int(CUDA.warpsize())
-            max_block_warps = cld(256, warp_threads)
-            full_mask = CUDA.FULL_MASK
+    # Per-thread rank output, aligned with the cached `keys` item slots.
+    ranks = MVector{ItemsPerThread, UInt32}(undef)
 
-            # Keep CUB-style 0-based warp/lane ids for rank arithmetic.
-            # CUDA.jl's laneid is 1-based, so keep both forms available.
-            warp_id = fld(thread_id - 1, warp_threads)
-            lane_in_warp = (thread_id - 1) % warp_threads
-            warp_lane_id = Int(CUDA.laneid())
-            nwarps = cld(nthreads, warp_threads)
+    # Get this CUDA thread's block and warp coordinates.
+    thread_id = Int(CUDA.threadIdx().x)
+    nthreads = Int(CUDA.blockDim().x)
+    warp_threads = Int(CUDA.warpsize())
+    warp_id = fld(thread_id - 1, warp_threads)
+    lane_in_warp = (thread_id - 1) % warp_threads
+    warp_lane_id = Int(CUDA.laneid())
+    full_mask = CUDA.FULL_MASK
 
-            # Partial tiles are guarded by `local_j <= tile_len`.
-            keys_per_thread = cld(TileSize, nthreads)
+    # -----------------------------------------------------
+    # 1. RankKeys(): ComputeHistogramsWarp(keys) plus CountsCallback bins.
+    #
+    # CUB groups lanes with the same digit, then increments a per-warp bucket
+    # count once per peer group. `warp_offsets` first stores those per-warp
+    # counts; a later stage overwrites the same storage with cursor ranges.
+    item = 0
+    while item < ItemsPerThread
+        # Map this thread/item slot to a tile-local input index.
+        local_j = warp_id * warp_threads * ItemsPerThread + item * warp_threads + lane_in_warp + 1
+        valid = local_j <= tile_len
 
-            # ####################################################
-            # 1. RankKeys(): bins -> exclusive_digit_prefix.
-            #
-            # CUB reference:
-            # - block_radix_rank.cuh lines 1127-1130
-            #
-            # RankKeys uses BlockScan to convert per-tile `bins` into
-            # `exclusive_digit_prefix`. Here `local_counts` already contains
-            # those bins from the earlier count path, so this helper scans the
-            # 256 bucket counts into `local_offsets`.
-            scan_base_idx = 256
-
-            # Reset the carry between scan chunks.
-            if thread_id == 1
-                @inbounds rank_cursors[scan_base_idx] = zero(UInt32)
-            end
-            CUDA.sync_threads()
-
-            # Scan bucket counts into exclusive offsets chunk by chunk.
-            chunk_start = 0
-            while chunk_start < 256
-                bucket = chunk_start + thread_id
-                valid_bucket = bucket <= 256
-                count = zero(UInt32)
-
-                if valid_bucket
-                    @inbounds count = local_counts[bucket]
-                end
-
-                inclusive = count
-
-                # Scan counts within each warp.
-                offset = 1
-                while offset < warp_threads
-                    addend = CUDA.shfl_up_sync(full_mask, inclusive, offset)
-                    if warp_lane_id > offset
-                        inclusive += addend
-                    end
-                    offset <<= 1
-                end
-
-                # Save each warp's chunk total.
-                if warp_lane_id == warp_threads
-                    @inbounds rank_cursors[warp_id + 1] = inclusive
-                end
-                CUDA.sync_threads()
-
-                warp_total = zero(UInt32)
-
-                if warp_lane_id <= nwarps
-                    @inbounds warp_total = rank_cursors[warp_lane_id]
-                end
-
-                warp_prefix = warp_total
-
-                # Scan warp totals to get per-warp prefixes.
-                if warp_id == 0
-                    offset = 1
-                    while offset < warp_threads
-                        addend = CUDA.shfl_up_sync(full_mask, warp_prefix, offset)
-                        if warp_lane_id > offset
-                            warp_prefix += addend
-                        end
-                        offset <<= 1
-                    end
-
-                    if warp_lane_id <= nwarps
-                        @inbounds rank_cursors[warp_lane_id] = warp_prefix - warp_total
-                    end
-                end
-                CUDA.sync_threads()
-
-                @inbounds scan_base = rank_cursors[scan_base_idx]
-                @inbounds warp_prefix = rank_cursors[warp_id + 1]
-
-                # Write this bucket's exclusive digit prefix.
-                if valid_bucket
-                    @inbounds local_offsets[bucket] = scan_base + warp_prefix + inclusive - count
-                end
-
-                # Carry this chunk's total into the next chunk.
-                if bucket == min(chunk_start + nthreads, 256)
-                    @inbounds rank_cursors[scan_base_idx] = scan_base + warp_prefix + inclusive
-                end
-                CUDA.sync_threads()
-
-                chunk_start += nthreads
-            end
-            CUDA.sync_threads()
-
-            # ####################################################
-            # 2. RankKeys(): ComputeHistogramsWarp(keys).
-            #
-            # CUB reference:
-            # - block_radix_rank.cuh lines 951-1014
-            #
-            # BRR computes per-warp histograms after the block-level digit
-            # prefixes are known. `warp_offsets` is first used as
-            # warp_offsets[warp, bucket] = count, so each warp can later receive
-            # a bucket-local cursor range.
-
-            # Clear per-warp bucket counters.
-            idx = thread_id
-            while idx <= max_block_warps * 256
-                @inbounds warp_offsets[idx] = zero(UInt32)
-                idx += nthreads
-            end
-            CUDA.sync_threads()
-
-            # Count tile items by warp and bucket.
-            item = 0
-            while item < keys_per_thread
-                local_j = warp_id * warp_threads * keys_per_thread + item * warp_threads + lane_in_warp + 1
-
-                if warp_id < nwarps && local_j <= tile_len
-                    i = rangemin + local_j - 1
-                    @inbounds bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
-                    idx = warp_id * 256 + bucket
-                    CUDA.atomic_add!(pointer(warp_offsets, idx), UInt32(1))
-                end
-
-                item += 1
-            end
-            CUDA.sync_threads()
-
-            # ####################################################
-            # 3. RankKeys(): ComputeOffsetsWarpDownsweep(exclusive_digit_prefix).
-            #
-            # CUB reference:
-            # - block_radix_rank.cuh lines 1016-1053, 1132
-            #
-            # Convert per-warp bucket counts into per-warp cursors. Each bucket
-            # starts from `exclusive_digit_prefix[bucket]`; each warp receives
-            # the running cursor for that bucket, then the running value is
-            # advanced by that warp's count.
-
-            # Turn per-warp counts into per-warp bucket cursors.
-            bucket = thread_id
-            while bucket <= 256
-                @inbounds running = local_offsets[bucket]
-                warp = 0
-
-                while warp < nwarps
-                    idx = warp * 256 + bucket
-                    @inbounds count = warp_offsets[idx]
-                    @inbounds warp_offsets[idx] = running
-                    running += count
-                    warp += 1
-                end
-
-                bucket += nthreads
-            end
-            CUDA.sync_threads()
-
-            # ####################################################
-            # 4. RankKeys(): ComputeRanksItem(keys, ranks, WARP_MATCH_ANY).
-            #
-            # CUB reference:
-            # - block_radix_rank.cuh lines 1091-1115, 1134
-            #
-            # BRR assigns each item a stable tile-local rank by grouping lanes
-            # with the same digit using WARP_MATCH_ANY. CUDA.jl does not expose
-            # match_any, so the helper rebuilds the peer mask with shuffles.
-            # The peer-group leader advances the warp's bucket cursor once,
-            # then each lane adds its peer-local prefix.
-            lane_mask_lt = CUDA.lanemask(<)
-
-            # Rank warp-striped items within each bucket.
-            item = 0
-            while item < keys_per_thread
-                local_j = warp_id * warp_threads * keys_per_thread + item * warp_threads + lane_in_warp + 1
-                valid = warp_id < nwarps && local_j <= tile_len
-
-                digit = UInt32(0)
-                bucket = 1
-
-                if valid
-                    i = rangemin + local_j - 1
-                    @inbounds bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
-                    digit = UInt32(bucket - 1)
-                end
-
-                valid_flag = valid ? UInt32(1) : UInt32(0)
-                peer_mask = UInt32(0)
-                src_lane = 1
-
-                # Rebuild match_any by comparing lanes' digits.
-                while src_lane <= warp_threads
-                    peer_digit = CUDA.shfl_sync(full_mask, digit, src_lane)
-                    peer_valid = CUDA.shfl_sync(full_mask, valid_flag, src_lane)
-
-                    if valid && peer_valid == UInt32(1) && peer_digit == digit
-                        peer_mask |= UInt32(1) << UInt32(src_lane - 1)
-                    end
-
-                    src_lane += 1
-                end
-
-                leader_lane = valid ? CUDA.ffs(peer_mask) : Int32(1)
-                digit_count = UInt32(CUDA.popc(peer_mask))
-                peer_digit_prefix = UInt32(CUDA.popc(peer_mask & lane_mask_lt))
-                warp_prefix = zero(UInt32)
-
-                # Advance the bucket cursor once per peer group.
-                if valid && warp_lane_id == Int(leader_lane)
-                    idx = warp_id * 256 + bucket
-                    warp_prefix = CUDA.atomic_add!(pointer(warp_offsets, idx), digit_count)
-                end
-
-                warp_prefix = CUDA.shfl_sync(full_mask, warp_prefix, leader_lane)
-
-                # Store the final tile-local rank.
-                if valid
-                    @inbounds local_ranks[local_j] = warp_prefix + peer_digit_prefix
-                end
-
-                CUDA.sync_warp(full_mask)
-                item += 1
-            end
-            CUDA.sync_threads()
-
-            return nothing
+        # Extract the current pass digit only for valid tile entries.
+        digit = UInt32(0)
+        bucket = 1
+        if valid
+            @inbounds key = keys[item + 1]
+            bucket = UnsignedRadixSorts._radix_bucket(key, Pass)
+            digit = UInt32(bucket - 1)
         end
+
+        # Group same-digit lanes so the warp issues one atomic per peer group.
+        peer_mask = _match_any(full_mask, digit, valid)
+        leader_lane = valid ? Int(CUDA.ffs(peer_mask)) : 1
+        peer_count = UInt32(CUDA.popc(peer_mask))
+
+        # The leader lane contributes the whole peer group to the warp bucket.
+        if valid && warp_lane_id == leader_lane
+            idx = warp_id * 256 + bucket
+            CUDA.atomic_add!(pointer(warp_offsets, idx), peer_count)
+        end
+
+        item += 1
+    end
+    CUDA.sync_threads()
+
+    # -----------------------------------------------------
+    # 2. CountsCallback: reduce per-warp counts into tile bins.
+    #
+    # `local_counts[bucket]` is the per-tile `bins` payload later published to
+    # d_lookback as PARTIAL and then upgraded to GLOBAL by lookback resolution.
+    bucket = thread_id
+    while bucket <= 256
+        # Each thread reduces one or more buckets across all block warps.
+        tile_count = zero(UInt32)
+        warp = 0
+        while warp < NWarps
+            idx = warp * 256 + bucket
+            @inbounds tile_count += warp_offsets[idx]
+            warp += 1
+        end
+        @inbounds local_counts[bucket] = tile_count
+        bucket += nthreads
+    end
+    CUDA.sync_threads()
+
+    # 3. CountsCallback -> LookbackPartial.
+    #
+    # CUB publishes PARTIAL as soon as RankKeys knows the bins. Doing it here
+    # lets later tiles observe this tile while the current block finishes the
+    # rank/scan work.
+    _publish_lookback_partial!(lookback, local_counts, tile_id)
+
+    # -----------------------------------------------------
+    # 4. RankKeys(): bins -> exclusive_digit_prefix.
+    #
+    # The radix digit count is fixed at 256, so a single thread can produce the
+    # exclusive prefixes cheaply and avoids shared-memory aliasing/scratch races
+    # in this correctness-critical path.
+    if thread_id == 1
+        running = zero(UInt32)
+        bucket = 1
+        while bucket <= 256
+            @inbounds count = local_counts[bucket]
+            @inbounds local_offsets[bucket] = running
+            running += count
+            bucket += 1
+        end
+    end
+    CUDA.sync_threads()
+
+    # -----------------------------------------------------
+    # 5. RankKeys(): ComputeOffsetsWarpDownsweep(exclusive_digit_prefix).
+    #
+    # Each bucket starts from `local_offsets[bucket]`. Warps receive disjoint
+    # cursor ranges for that bucket in warp order, preserving tile stability.
+    bucket = thread_id
+    while bucket <= 256
+        # Replace each warp's count with that warp's starting cursor.
+        @inbounds running = local_offsets[bucket]
+        warp = 0
+        while warp < NWarps
+            idx = warp * 256 + bucket
+            @inbounds count = warp_offsets[idx]
+            @inbounds warp_offsets[idx] = running
+            running += count
+            warp += 1
+        end
+        bucket += nthreads
+    end
+    CUDA.sync_threads()
+
+    # -----------------------------------------------------
+    # 6. RankKeys(): ComputeRanksItem(keys, ranks, WARP_MATCH_ANY).
+    #
+    # Warp order, item order, and lane peer prefixes match the warp-striped
+    # input order used by `_load_keys!`. The peer-group leader advances the
+    # warp bucket cursor once, then every peer adds its lane-local prefix.
+    lane_mask_lt = CUDA.lanemask(<)
+    item = 0
+    while item < ItemsPerThread
+        # Recompute the same tile-local input index and digit for rank output.
+        local_j = warp_id * warp_threads * ItemsPerThread + item * warp_threads + lane_in_warp + 1
+        valid = local_j <= tile_len
+
+        digit = UInt32(0)
+        bucket_for_key = 1
+        if valid
+            @inbounds key = keys[item + 1]
+            bucket_for_key = UnsignedRadixSorts._radix_bucket(key, Pass)
+            digit = UInt32(bucket_for_key - 1)
+        end
+
+        # Peer prefix is the number of same-digit lanes before this lane.
+        peer_mask = _match_any(full_mask, digit, valid)
+        leader_lane = valid ? Int(CUDA.ffs(peer_mask)) : 1
+        peer_count = UInt32(CUDA.popc(peer_mask))
+        peer_prefix = UInt32(CUDA.popc(peer_mask & lane_mask_lt))
+        warp_bucket_prefix = zero(UInt32)
+
+        if valid && warp_lane_id == leader_lane
+            idx = warp_id * 256 + bucket_for_key
+            warp_bucket_prefix = CUDA.atomic_add!(pointer(warp_offsets, idx), peer_count)
+        end
+
+        # Broadcast the leader's cursor to the whole peer group.
+        warp_bucket_prefix = CUDA.shfl_sync(full_mask, warp_bucket_prefix, leader_lane)
+        rank = valid ? warp_bucket_prefix + peer_prefix : zero(UInt32)
+        @inbounds ranks[item + 1] = rank
+        item += 1
+    end
+
+    return ranks
+end
     end
 end

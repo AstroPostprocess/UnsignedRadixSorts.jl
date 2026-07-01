@@ -20,7 +20,8 @@ function _select_pass_key_buffers end
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function _select_pass_key_buffers(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{Pass}) where {KeyV <: CuDeviceVector{$KeyT}, OffsetV <: CuDeviceVector{UInt32}, Pass}
+        @inline function _select_pass_key_buffers(codes :: CodeV, ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, :: Val{Pass}) where {CodeV <: CuDeviceVector{$KeyT}, WorkspaceKeyV <: CuDeviceVector{$KeyT}, OffsetV <: CuDeviceVector{UInt32}, Pass}
+            # Odd/even radix passes ping-pong between the user buffer and ws.dst.
             if isodd(Pass)
                 return codes, ws.dst
             else

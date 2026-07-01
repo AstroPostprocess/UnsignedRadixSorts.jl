@@ -16,11 +16,15 @@ running `Process()` for that tile.
 - `claimed_tile`: Shared-memory scalar used to broadcast the claimed tile id.
 """
 @inline function _claim_next_tile!(tile_counter :: OffsetV, claimed_tile :: SharedV) where {OffsetV <: CuDeviceVector{UInt32}, SharedV <: CuDeviceVector{UInt32}}
+    # Only one thread claims work for the whole CUDA block.
     thread_id = Int(CUDA.threadIdx().x)
 
     if thread_id == 1
+        # CUDA.atomic_add! returns the old value, which is the claimed tile id.
         @inbounds claimed_tile[1] = CUDA.atomic_add!(pointer(tile_counter, 1), UInt32(1))
     end
+
+    # Broadcast the claimed tile id through shared memory.
     CUDA.sync_threads()
 
     return Int(claimed_tile[1])

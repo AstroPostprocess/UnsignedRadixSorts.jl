@@ -31,7 +31,7 @@ for (KeyT, NPasses, NParts) in (
         #    (pass, bucket) into ws.bucket_offsets.
         # 2. bucket_offsets_exclusive_scan_kernel! converts those counts into
         #    1-based exclusive bucket starts for the later OneSweep pass.
-        function UnsignedRadixSorts.prepare_bucket_offsets!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, codes :: KeyV, :: Val{NBlocks} = Val(256), :: Val{ThreadsPerBlock} = Val(128)) where {KeyV <: CuVector{$KeyT}, OffsetV <: CuVector{UInt32}, NBlocks, ThreadsPerBlock}
+        function UnsignedRadixSorts.prepare_bucket_offsets!(ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, codes :: CodeV, :: Val{NBlocks} = Val(256), :: Val{ThreadsPerBlock} = Val(128)) where {CodeV <: CuVector{$KeyT}, WorkspaceKeyV <: CuVector{$KeyT}, OffsetV <: CuVector{UInt32}, NBlocks, ThreadsPerBlock}
             # Clear CUB's d_bins equivalent. After the histogram kernel this
             # buffer holds counts; after the scan kernel it holds bucket starts.
             fill!(ws.bucket_offsets, zero(UInt32))
@@ -71,7 +71,7 @@ for (KeyT, NPasses, NParts) in (
         #
         # where pass and bucket are 1-based Julia indices, and part is the
         # private histogram slice chosen from the CUDA thread id.
-        @inline function prepass_histogram_kernel!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, codes :: KeyV) where {KeyV <: CuDeviceVector{$KeyT}, OffsetV <: CuDeviceVector{UInt32}}
+        @inline function prepass_histogram_kernel!(ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, codes :: CodeV) where {CodeV <: CuDeviceVector{$KeyT}, WorkspaceKeyV <: CuDeviceVector{$KeyT}, OffsetV <: CuDeviceVector{UInt32}}
             nelems = length(codes)
 
             # CUDA equivalents:
@@ -178,44 +178,62 @@ for (KeyT, NPasses, NParts) in (
         #   DeviceRadixSortExclusiveSumKernel<<<NPasses, 256>>>
         #
         # This CUDA version follows that shape. Each block handles one
-        # pass, and each of its 256 threads owns one bucket. A simple shared-memory
-        # Hillis-Steele scan is used here; CUB's BlockScan is more optimized, but
-        # the dataflow and launch shape are the same.
+        # pass, and each of its 256 threads owns one bucket. Warp scans plus a
+        # scan of the eight warp totals implement the block-wide exclusive sum.
         @inline function bucket_offsets_exclusive_scan_kernel!(ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}) where {KeyV <: CuDeviceVector{$KeyT}, OffsetV <: CuDeviceVector{UInt32}}
-            # block_id is the pass id because this kernel is launched with
-            # blocks=NPasses and threads=256.
             pass = Int(CUDA.blockIdx().x)
             bucket = Int(CUDA.threadIdx().x)
+            warp_threads = Int(CUDA.warpsize())
+            warp_id = fld(bucket - 1, warp_threads)
+            warp_lane_id = Int(CUDA.laneid())
+            nwarps = 256 ÷ warp_threads
+            full_mask = CUDA.FULL_MASK
 
-            counts = CUDA.CuStaticSharedArray(UInt32, 256)
+            warp_totals = CUDA.CuStaticSharedArray(UInt32, 8)
 
-            # Load this pass's bucket counts into shared memory. At this
-            # point ws.bucket_offsets still holds histogram counts, not starts.
             idx = UnsignedRadixSorts._bucket_offsets_index(pass, bucket)
-            @inbounds counts[bucket] = ws.bucket_offsets[idx]
-            CUDA.sync_threads()
+            @inbounds count = ws.bucket_offsets[idx]
+            inclusive = count
 
-            # Inclusive scan over counts[1:256]. This is the straightforward
-            # shared-memory scan equivalent of CUB BlockScan, not its optimized
-            # implementation.
             offset = 1
-            while offset < 256
-                addend = bucket > offset ? counts[bucket - offset] : zero(UInt32)
-
-                # Ensure every thread has read the previous scan stage before
-                # any thread writes this stage.
-                CUDA.sync_threads()
-                @inbounds counts[bucket] += addend
-                CUDA.sync_threads()
-
+            while offset < warp_threads
+                addend = CUDA.shfl_up_sync(full_mask, inclusive, offset)
+                if warp_lane_id > offset
+                    inclusive += addend
+                end
                 offset <<= 1
             end
 
-            # Convert inclusive counts to 1-based exclusive starts. CUB's d_bins
-            # are 0-based offsets; this Julia sorter stores output indices, so
-            # bucket 1 starts at index 1.
-            start = bucket == 1 ? one(UInt32) : counts[bucket - 1] + one(UInt32)
-            @inbounds ws.bucket_offsets[idx] = start
+            if warp_lane_id == warp_threads
+                @inbounds warp_totals[warp_id + 1] = inclusive
+            end
+            CUDA.sync_threads()
+
+            if warp_id == 0
+                warp_total = zero(UInt32)
+                if warp_lane_id <= nwarps
+                    @inbounds warp_total = warp_totals[warp_lane_id]
+                end
+                warp_inclusive = warp_total
+
+                offset = 1
+                while offset < warp_threads
+                    addend = CUDA.shfl_up_sync(full_mask, warp_inclusive, offset)
+                    if warp_lane_id > offset
+                        warp_inclusive += addend
+                    end
+                    offset <<= 1
+                end
+
+                if warp_lane_id <= nwarps
+                    @inbounds warp_totals[warp_lane_id] = warp_inclusive - warp_total
+                end
+            end
+            CUDA.sync_threads()
+
+            @inbounds warp_prefix = warp_totals[warp_id + 1]
+            exclusive = warp_prefix + inclusive - count
+            @inbounds ws.bucket_offsets[idx] = exclusive + one(UInt32)
 
             return nothing
         end

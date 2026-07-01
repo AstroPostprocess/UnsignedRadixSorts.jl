@@ -1,38 +1,35 @@
 """
-    _clear_tile_storage!(local_counts, local_offsets, rank_cursors, global_offsets)
+    _clear_rank_storage!(warp_offsets, ::Val{NWarps})
 
-Clear the CUDA block-local temporary storage used by the next claimed tile.
+Clear the per-warp radix counters/cursors used by the next claimed tile.
 
-Each thread clears a strided subset of the 256 radix buckets, then the block
-synchronizes before counting starts. The arrays represent the current block's
-bins, exclusive digit prefixes, rank cursors, and global scatter bases.
+`warp_offsets` has `NWarps * 256` entries. It first stores per-warp bucket
+counts and is later overwritten with per-warp bucket cursors.
 
-CUB parallel: these arrays collectively stand in for the agent temporary
-storage used for `bins`, `exclusive_digit_prefix`, rank cursors, and
-`TempStorage_::global_offsets`.
+CUB parallel: this is the reusable BlockRadixRank scratch inside
+`TempStorage_::rank_temp_storage`; it is cleared for each claimed tile before
+`RankKeys` builds per-warp histograms.
 
 # Parameters
 
-- `local_counts`: Shared-memory bucket counts; overwritten with zeros.
-- `local_offsets`: Shared-memory exclusive digit prefixes; overwritten with zeros.
-- `rank_cursors`: Shared-memory cursors used while assigning stable local ranks; overwritten with zeros.
-- `global_offsets`: Shared-memory global scatter bases; overwritten with zeros.
+- `warp_offsets`: Shared-memory per-warp bucket storage.
+- `::Val{NWarps}`: Compile-time number of warps in the CUDA block.
 """
-@inline function _clear_tile_storage!(local_counts :: SharedV, local_offsets :: SharedV, rank_cursors :: SharedV, global_offsets :: SharedV) where {SharedV <: CuDeviceVector{UInt32}}
+@inline function _clear_rank_storage!(warp_offsets :: SharedV, :: Val{NWarps}) where {SharedV <: CuDeviceVector{UInt32}, NWarps}
+    # Use the whole block to clear the flattened warp/bucket table.
     thread_id = Int(CUDA.threadIdx().x)
     nthreads = Int(CUDA.blockDim().x)
 
-    bucket = thread_id
-    while bucket <= 256
-        @inbounds begin
-            local_counts[bucket] = zero(UInt32)
-            local_offsets[bucket] = zero(UInt32)
-            rank_cursors[bucket] = zero(UInt32)
-            global_offsets[bucket] = zero(UInt32)
-        end
-        bucket += nthreads
+    # Flattened layout: warp_offsets[warp * 256 + bucket].
+    idx = thread_id
+    while idx <= NWarps * 256
+        # Clear every warp/bucket counter. The following barrier makes the
+        # storage safe for the count phase of `_rank_keys_early_counts!`.
+        @inbounds warp_offsets[idx] = zero(UInt32)
+        idx += nthreads
     end
-    CUDA.sync_threads()
 
+    # Ensure no stale cursor/count remains before RankKeys starts.
+    CUDA.sync_threads()
     return nothing
 end

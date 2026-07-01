@@ -3,33 +3,38 @@
 
 Publish this CUDA block's per-bucket counts as PARTIAL lookback entries.
 
-Each thread publishes a strided subset of buckets. The helper reads the
-block-local count, packs it with `_partial_entry`, and atomically stores it at
-`_lookback_index(tile_id, bucket)`. Later blocks spin on these entries while
-resolving their global offsets.
+Threads cooperatively publish the 256 buckets in strided order. Atomic exchange
+is retained as the verified publication mechanism.
 
-CUB parallel: this is the required `CountsCallback -> LookbackPartial`
-publication of per-tile `bins`.
+CUB parallel: `CountsCallback -> LookbackPartial`. The packed entry stores
+`bins[bin] | LOOKBACK_PARTIAL_MASK` at
+`d_lookback[block_idx * RADIX_DIGITS + bin]`, allowing later tiles to start
+their decoupled lookback before this tile has finished global offset resolution.
 
 # Parameters
 
-- `lookback`: CUDA packed lookback table updated with PARTIAL entries.
-- `local_counts`: Shared-memory bucket counts to publish.
-- `tile_id`: 0-based tile id claimed by the block.
+- `lookback`: Packed global OneSweep lookback table.
+- `local_counts`: Shared-memory tile counts for all radix buckets.
+- `tile_id`: Current 0-based tile id.
 """
 @inline function _publish_lookback_partial!(lookback :: OffsetV, local_counts :: SharedV, tile_id :: Int) where {OffsetV <: CuDeviceVector{UInt32}, SharedV <: CuDeviceVector{UInt32}}
+    # Threads cooperatively own buckets in block-strided order.
     thread_id = Int(CUDA.threadIdx().x)
     nthreads = Int(CUDA.blockDim().x)
 
     bucket = thread_id
     while bucket <= 256
+        # Pack this tile's local count with the PARTIAL state bit.
         @inbounds count = local_counts[bucket]
         idx = UnsignedRadixSorts._lookback_index(tile_id, bucket)
         entry = UnsignedRadixSorts._partial_entry(count)
+        # Publish the count and state bit together. Later blocks spin until
+        # this entry is nonzero, then accumulate the payload count.
         CUDA.atomic_xchg!(pointer(lookback, idx), entry)
         bucket += nthreads
     end
-    CUDA.sync_threads()
 
+    # Make PARTIAL entries visible before this block depends on lookback state.
+    CUDA.sync_threads()
     return nothing
 end

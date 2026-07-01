@@ -21,7 +21,8 @@ function _select_pass_key_value_buffers end
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function _select_pass_key_value_buffers(codes :: KeyV, ws :: OnesweepWorkspace{$KeyT, KeyV, OffsetV}, :: Val{Pass}) where {KeyV <: CuDeviceVector{$KeyT}, OffsetV <: CuDeviceVector{UInt32}, Pass}
+        @inline function _select_pass_key_value_buffers(codes :: CodeV, ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, :: Val{Pass}) where {CodeV <: CuDeviceVector{$KeyT}, WorkspaceKeyV <: CuDeviceVector{$KeyT}, OffsetV <: CuDeviceVector{UInt32}, Pass}
+            # Keep key and permutation ping-pong buffers on the same pass side.
             if isodd(Pass)
                 return codes, ws.dst, ws.perms[1], ws.perms[2]
             else
