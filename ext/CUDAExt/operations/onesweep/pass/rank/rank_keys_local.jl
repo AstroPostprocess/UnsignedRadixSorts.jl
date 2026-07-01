@@ -18,7 +18,108 @@ using StaticArrays: MVector
 ## - returned `ranks[item]`  ~= stable tile-local rank
 
 """
-    _rank_keys_early_counts!(keys, warp_offsets, local_counts, local_offsets, lookback, tile_id, tile_len, ::Val{TileSize}, ::Val{ThreadsPerBlock}, ::Val{Pass})
+    _exclusive_scan(local_counts, local_offsets, scan_scratch, ::Val{ThreadsPerBlock})
+
+Compute the exclusive prefix sum of the 256 radix-bin counts in parallel.
+
+Each thread first scans a contiguous subset of radix bins. Warp-level scans
+then combine the per-thread totals, and the first warp scans the warp totals to
+produce block-wide prefixes. `scan_scratch` must provide at least
+`ThreadsPerBlock ÷ 32` `UInt32` entries.
+
+# Parameters
+
+- `local_counts`: Shared-memory counts for the 256 radix buckets.
+- `local_offsets`: Shared-memory exclusive prefixes written in-place.
+- `scan_scratch`: Shared-memory scratch with at least one `UInt32` per warp.
+- `::Val{ThreadsPerBlock}`: Compile-time CUDA block size.
+"""
+@inline function _exclusive_scan(local_counts :: CountsV, local_offsets :: OffsetsV, scan_scratch :: ScratchV, :: Val{ThreadsPerBlock}) where {CountsV <: CuDeviceVector{UInt32}, OffsetsV <: CuDeviceVector{UInt32}, ScratchV <: CuDeviceVector{UInt32}, ThreadsPerBlock}
+    BinsPerThread = cld(256, ThreadsPerBlock)
+    NWarps = ThreadsPerBlock ÷ 32
+
+    thread_id = Int(CUDA.threadIdx().x)
+    warp_threads = Int(CUDA.warpsize())
+    warp_id = fld(thread_id - 1, warp_threads)
+    warp_lane_id = Int(CUDA.laneid())
+    full_mask = CUDA.FULL_MASK
+
+    # Scan the contiguous bucket range owned by this thread.
+    thread_total = zero(UInt32)
+    bin_item = 0
+    while bin_item < BinsPerThread
+        bucket = (thread_id - 1) * BinsPerThread + bin_item + 1
+
+        if bucket <= 256
+            @inbounds count = local_counts[bucket]
+            @inbounds local_offsets[bucket] = thread_total
+            thread_total += count
+        end
+
+        bin_item += 1
+    end
+
+    # Inclusive scan of per-thread totals within each warp.
+    inclusive = thread_total
+    offset = 1
+    while offset < warp_threads
+        addend = CUDA.shfl_up_sync(full_mask, inclusive, offset)
+        if warp_lane_id > offset
+            inclusive += addend
+        end
+        offset <<= 1
+    end
+
+    # Store one total per warp.
+    if warp_lane_id == warp_threads
+        @inbounds scan_scratch[warp_id + 1] = inclusive
+    end
+    CUDA.sync_threads()
+
+    # The first warp computes exclusive prefixes of the warp totals.
+    if warp_id == 0
+        warp_total = zero(UInt32)
+        if warp_lane_id <= NWarps
+            @inbounds warp_total = scan_scratch[warp_lane_id]
+        end
+
+        warp_inclusive = warp_total
+        offset = 1
+        while offset < warp_threads
+            addend = CUDA.shfl_up_sync(full_mask, warp_inclusive, offset)
+            if warp_lane_id > offset
+                warp_inclusive += addend
+            end
+            offset <<= 1
+        end
+
+        if warp_lane_id <= NWarps
+            @inbounds scan_scratch[warp_lane_id] = warp_inclusive - warp_total
+        end
+    end
+    CUDA.sync_threads()
+
+    # Add the block-wide prefix of this thread to its local bucket prefixes.
+    @inbounds warp_prefix = scan_scratch[warp_id + 1]
+    thread_prefix = warp_prefix + inclusive - thread_total
+
+    bin_item = 0
+    while bin_item < BinsPerThread
+        bucket = (thread_id - 1) * BinsPerThread + bin_item + 1
+
+        if bucket <= 256
+            @inbounds local_offsets[bucket] += thread_prefix
+        end
+
+        bin_item += 1
+    end
+
+    CUDA.sync_threads()
+    return nothing
+end
+
+"""
+    _rank_keys_early_counts!(keys, warp_offsets, local_counts, local_offsets, scan_scratch, lookback, tile_id, tile_len, ::Val{TileSize}, ::Val{ThreadsPerBlock}, ::Val{Pass})
 
 Compute stable tile-local ranks and early per-bucket counts from cached keys.
 
@@ -36,6 +137,7 @@ is represented by the early `local_counts` reduction and
 - `warp_offsets`: Shared per-warp bucket counts, later overwritten with cursors.
 - `local_counts`: Shared tile counts for all 256 buckets.
 - `local_offsets`: Shared exclusive tile prefixes for all 256 buckets.
+- `scan_scratch`: Shared scratch with at least one `UInt32` entry per warp.
 - `lookback`: Packed global OneSweep lookback table.
 - `tile_id`: Current 0-based tile id.
 - `tile_len`: Number of valid keys in the tile.
@@ -51,7 +153,7 @@ function _rank_keys_early_counts! end
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function _rank_keys_early_counts!(keys :: MVector{ItemsPerThread, $KeyT}, warp_offsets :: SharedV, local_counts :: SharedV, local_offsets :: SharedV, lookback :: OffsetV, tile_id :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{ThreadsPerBlock}, :: Val{Pass}) where {ItemsPerThread, SharedV <: CuDeviceVector{UInt32}, OffsetV <: CuDeviceVector{UInt32}, TileSize, ThreadsPerBlock, Pass}
+        @inline function _rank_keys_early_counts!(keys :: MVector{ItemsPerThread, $KeyT}, warp_offsets :: SharedV, local_counts :: SharedV, local_offsets :: SharedV, scan_scratch :: SharedV, lookback :: OffsetV, tile_id :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{ThreadsPerBlock}, :: Val{Pass}) where {ItemsPerThread, SharedV <: CuDeviceVector{UInt32}, OffsetV <: CuDeviceVector{UInt32}, TileSize, ThreadsPerBlock, Pass}
             NWarps = ThreadsPerBlock ÷ 32
 
     # Per-thread rank output, aligned with the cached `keys` item slots.
@@ -132,20 +234,14 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
     # -----------------------------------------------------
     # 4. RankKeys(): bins -> exclusive_digit_prefix.
     #
-    # The radix digit count is fixed at 256, so a single thread can produce the
-    # exclusive prefixes cheaply and avoids shared-memory aliasing/scratch races
-    # in this correctness-critical path.
-    if thread_id == 1
-        running = zero(UInt32)
-        bucket = 1
-        while bucket <= 256
-            @inbounds count = local_counts[bucket]
-            @inbounds local_offsets[bucket] = running
-            running += count
-            bucket += 1
-        end
-    end
-    CUDA.sync_threads()
+    # Threads scan contiguous bucket ranges, then a hierarchical warp/block
+    # scan converts those local prefixes into block-wide exclusive offsets.
+    _exclusive_scan(
+        local_counts,
+        local_offsets,
+        scan_scratch,
+        Val(ThreadsPerBlock),
+    )
 
     # -----------------------------------------------------
     # 5. RankKeys(): ComputeOffsetsWarpDownsweep(exclusive_digit_prefix).
