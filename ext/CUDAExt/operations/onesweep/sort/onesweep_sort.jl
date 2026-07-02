@@ -12,13 +12,17 @@ for (KeyT, NPasses) in (
             ThreadsPerBlock % 32 == 0 || throw(ArgumentError("CUDA BlockRadixRank path requires ThreadsPerBlock to be a multiple of 32"))
             ThreadsPerBlock <= 256 || throw(ArgumentError("CUDA BlockRadixRank path currently supports ThreadsPerBlock <= 256"))
 
+            # Work partitioning and dynamic shared-memory size for every pass.
             nelems = length(codes)
             ntiles = cld(nelems, TileSize)
             temp_storage_bytes = _onesweep_pass_shmem_bytes($KeyT, Val(TileSize), Val(ThreadsPerBlock))
 
+            # Allocate/reuse global workspace and prepare the pass-wide bucket
+            # starts used by decoupled lookback.
             initialize_base_workspace!(ws, nelems, ntiles)
             prepare_bucket_offsets!(ws, codes, Val(NBlocks), Val(ThreadsPerBlock))
 
+            # Launch one 8-bit OneSweep pass per byte of the key type.
             @nexprs $NPasses digit -> begin
                 reset_pass_workspace!(ws)
                 CUDA.@cuda threads=ThreadsPerBlock blocks=NBlocks shmem=temp_storage_bytes onesweep_pass_kernel!(
@@ -30,6 +34,7 @@ for (KeyT, NPasses) in (
                 )
             end
 
+            # Odd pass counts leave the final keys in the workspace buffer.
             $(isodd(NPasses) ? :(copyto!(codes, ws.dst)) : :(nothing))
             return nothing
         end
@@ -46,13 +51,17 @@ for (KeyT, NPasses) in (
             ThreadsPerBlock % 32 == 0 || throw(ArgumentError("CUDA BlockRadixRank path requires ThreadsPerBlock to be a multiple of 32"))
             ThreadsPerBlock <= 256 || throw(ArgumentError("CUDA BlockRadixRank path currently supports ThreadsPerBlock <= 256"))
 
+            # Work partitioning and dynamic shared-memory size for every pass.
             nelems = length(codes)
             ntiles = cld(nelems, TileSize)
             temp_storage_bytes = _onesweep_pass_shmem_bytes($KeyT, Val(TileSize), Val(ThreadsPerBlock))
 
+            # Initialize key/value ping-pong workspace and precompute the
+            # pass-wide bucket starts shared by all permutation passes.
             initialize_perm_workspace!(ws, nelems, ntiles, Val(NBlocks), Val(ThreadsPerBlock), Val(TileSize))
             prepare_bucket_offsets!(ws, codes, Val(NBlocks), Val(ThreadsPerBlock))
 
+            # Launch one 8-bit OneSweep key/value pass per byte of the key type.
             @nexprs $NPasses digit -> begin
                 reset_pass_workspace!(ws)
                 CUDA.@cuda threads=ThreadsPerBlock blocks=NBlocks shmem=temp_storage_bytes onesweep_perm_pass_kernel!(
@@ -64,6 +73,8 @@ for (KeyT, NPasses) in (
                 )
             end
 
+            # Odd pass counts leave the final keys in the workspace buffer;
+            # the returned permutation side must match that final key side.
             $(isodd(NPasses) ? :(copyto!(codes, ws.dst)) : :(nothing))
             return $(isodd(NPasses) ? :(ws.perms[2]) : :(ws.perms[1]))
         end

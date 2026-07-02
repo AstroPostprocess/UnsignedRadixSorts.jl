@@ -6,7 +6,7 @@ Clear the per-warp radix counters/cursors used by the next claimed tile.
 `warp_offsets` has `NWarps * 256` entries. It first stores per-warp bucket
 counts and is later overwritten with per-warp bucket cursors.
 
-CUB parallel: this is the reusable BlockRadixRank scratch inside
+CUB parallel: this is the reusable BlockRadixRank temporary storage inside
 `TempStorage_::rank_temp_storage`; it is cleared for each claimed tile before
 `RankKeys` builds per-warp histograms.
 

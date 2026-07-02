@@ -12,8 +12,7 @@
 
 ## Return the dense 1-based worker id for the current default thread-pool thread.
 @inline function _worker_id()
-    default_tids = Base.Threads.threadpooltids(:default)
-    return Base.Threads.threadid() - first(default_tids) + 1
+    return Base.Threads.threadid() - Base.Threads.threadpoolsize(:interactive)
 end
 
 ## Return the flattened base for a 256-bucket block.

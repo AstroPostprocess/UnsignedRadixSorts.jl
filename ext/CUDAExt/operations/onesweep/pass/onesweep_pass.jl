@@ -63,12 +63,13 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # CUDA dynamic shared-memory equivalent of CUB agent temporary storage.
             #
             # CUDA.jl static shared arrays of the same element type and length
-            # alias each other, so keep all UInt32 scratch in one manually
-            # partitioned dynamic buffer.
+            # can alias in this pattern, so keep all UInt32 temporary storage in one
+            # manually partitioned dynamic buffer.
             # warp_offsets   ~= BlockRadixRank per-warp digit counts/cursors
             # local_counts   ~= CountsCallback bins
             # local_offsets  ~= exclusive_digit_prefix
-            # global_offsets ~= TempStorage_::global_offsets
+            # global_offsets ~= TempStorage_::global_offsets, reused as
+            #                   RankKeys scan storage before lookback fills it
             # claimed_tile   ~= TempStorage_::block_idx
             # keys_out       ~= TempStorage_::keys_out
             shared_offset = 0
@@ -185,6 +186,8 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             shared_offset += 256 * sizeof(UInt32)
             local_offsets = CUDA.CuDynamicSharedArray(UInt32, 256, shared_offset)
             shared_offset += 256 * sizeof(UInt32)
+            # Reuse this slice as RankKeys scan storage before lookback
+            # overwrites it with final per-bucket scatter bases.
             global_offsets = CUDA.CuDynamicSharedArray(UInt32, 256, shared_offset)
             shared_offset += 256 * sizeof(UInt32)
             claimed_tile = CUDA.CuDynamicSharedArray(UInt32, 1, shared_offset)

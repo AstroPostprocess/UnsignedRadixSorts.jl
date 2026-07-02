@@ -7,7 +7,7 @@ Workspace storage for Onesweep radix sort passes over unsigned integer keys.
 
 - `KeyT`: Unsigned integer key type sorted by the workspace.
 - `KeyV`: Abstract vector type used for key storage.
-- `OffsetV`: Abstract vector type used for UInt32 counters, offsets, ranks, and permutation buffers.
+- `OffsetV`: Abstract vector type used for UInt32 counters, offsets, ranks, temporary storage, and permutation buffers.
 
 # Fields
 
@@ -22,6 +22,9 @@ Workspace storage for Onesweep radix sort passes over unsigned integer keys.
 - `global_offsets::OffsetV`     : Per-worker global output offsets for the current tile.
 - `rank_cursors::OffsetV`       : Per-worker cursors used while assigning tile-local ranks.
 - `local_ranks::OffsetV`        : Per-worker tile-local ranks for elements in the current tile.
+- `keys::KeyV`                  : Per-worker cached keys for the current tile.
+- `keys_out::KeyV`              : Per-worker tile-ranked key staging buffer.
+- `values_out::OffsetV`         : Per-worker tile-ranked value staging buffer for permutation sorting.
 
 """
 struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV <: AbstractVector{UInt32}}
@@ -93,11 +96,34 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
 
     ## Per-worker local ranks.
     ## Corresponds to CUB's per-thread `ranks`, but stored as a flat
-    ## per-worker scratch buffer in this CPU implementation.
+    ## per-worker temporary buffer in this CPU implementation.
     ## local_ranks[(worker_id - 1) * TileSize + local_i] stores the local
     ## rank of the `local_i`-th element in the current tile.
     ## Length = TileSize * nworkers.
     local_ranks :: OffsetV
+
+    ## Per-worker cached keys.
+    ## CPU storage for CUB Process()'s local
+    ## bit_ordered_type keys[ITEMS_PER_THREAD] array.
+    ## keys[(worker_id - 1) * TileSize + local_i] stores the loaded key for
+    ## the `local_i`-th element in the current tile.
+    ## Length = TileSize * nworkers.
+    keys :: KeyV
+
+    ## Per-worker tile-ranked keys.
+    ## Corresponds to CUB AgentRadixSortOnesweep::TempStorage_::keys_out.
+    ## keys_out[(worker_id - 1) * TileSize + rank + 1] stores the key after
+    ## ScatterKeysShared has reordered the tile by local rank.
+    ## Length = TileSize * nworkers.
+    keys_out :: KeyV
+
+    ## Per-worker tile-ranked permutation values.
+    ## Corresponds to CUB AgentRadixSortOnesweep::TempStorage_::values_out
+    ## for GatherScatterValues.
+    ## values_out[(worker_id - 1) * TileSize + rank + 1] stores the paired
+    ## permutation value after ScatterValuesShared.
+    ## Length = TileSize * nworkers.
+    values_out :: OffsetV
 
     function OnesweepWorkspace(:: Type{KeyV}) where {KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}}
         # Global workspaces
@@ -119,8 +145,11 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
         global_offsets = similar(dst, UInt32, 0)
         rank_cursors   = similar(dst, UInt32, 0)
         local_ranks    = similar(dst, UInt32, 0)
+        keys           = similar(dst, 0)
+        keys_out       = similar(dst, 0)
+        values_out     = similar(dst, UInt32, 0)
 
-        # Type stablizer
+        # Type stabilizer.
         OffsetV  = typeof(bucket_offsets)
 
         return new{KeyT, KeyV, OffsetV}(
@@ -134,7 +163,10 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
             local_offsets,
             global_offsets,
             rank_cursors,
-            local_ranks
+            local_ranks,
+            keys,
+            keys_out,
+            values_out
         )
     end
 
@@ -150,6 +182,9 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
             global_offsets :: OffsetV,
             rank_cursors :: OffsetV,
             local_ranks :: OffsetV,
+            keys :: KeyV,
+            keys_out :: KeyV,
+            values_out :: OffsetV,
         ) where {KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV <: AbstractVector{UInt32}}
 
         return new{KeyT, KeyV, OffsetV}(
@@ -163,7 +198,10 @@ struct OnesweepWorkspace{KeyT <: Unsigned, KeyV <: AbstractVector{KeyT}, OffsetV
             local_offsets,
             global_offsets,
             rank_cursors,
-            local_ranks
+            local_ranks,
+            keys,
+            keys_out,
+            values_out
         )
     end
 end
@@ -180,6 +218,9 @@ function Adapt.adapt_structure(to, x :: OnesweepWorkspace)
     global_offsets = Adapt.adapt(to, x.global_offsets)
     rank_cursors = Adapt.adapt(to, x.rank_cursors)
     local_ranks = Adapt.adapt(to, x.local_ranks)
+    keys = Adapt.adapt(to, x.keys)
+    keys_out = Adapt.adapt(to, x.keys_out)
+    values_out = Adapt.adapt(to, x.values_out)
 
     return OnesweepWorkspace(
         dst,
@@ -193,6 +234,9 @@ function Adapt.adapt_structure(to, x :: OnesweepWorkspace)
         global_offsets,
         rank_cursors,
         local_ranks,
+        keys,
+        keys_out,
+        values_out,
     )
 end
 
@@ -203,7 +247,7 @@ Create an empty Onesweep workspace using storage compatible with `KeyV`.
 
 # Parameters
 
-- `::Type{KeyV}`: Vector type used for key storage and derived scratch buffers.
+- `::Type{KeyV}`: Vector type used for key storage and derived temporary buffers.
 
 # Returns
 
@@ -216,6 +260,10 @@ OnesweepWorkspace(::Type{KeyV}) where {KeyT <: Unsigned, KeyV <: AbstractVector{
 
 Resize and clear the base buffers required by all Onesweep backends.
 
+OneSweep lookback entries use the high two bits of a `UInt32` as PARTIAL/GLOBAL
+state and the lower 30 bits as the count payload. This guard keeps every
+per-bucket prefix representable in that payload.
+
 # Parameters
 
 - `ws`: Workspace whose internal buffers are resized and initialized.
@@ -223,6 +271,9 @@ Resize and clear the base buffers required by all Onesweep backends.
 - `ntiles`: Number of tiles processed by a radix pass.
 """
 function initialize_base_workspace!(ws :: OnesweepWorkspace{KeyT}, nelems :: Int, ntiles :: Int) where {KeyT <: Unsigned}
+    nelems <= Int(typemax(UInt32) >> 2) ||
+        throw(ArgumentError("OneSweep lookback supports at most $(typemax(UInt32) >> 2) elements"))
+
     npass = _npasses(KeyT)
 
     resize!(ws.dst, nelems)
@@ -248,7 +299,7 @@ Resize and clear the buffers required for CPU Onesweep key sorting.
 - `ws`: Workspace whose internal buffers are resized and initialized.
 - `nelems`: Number of elements to sort.
 - `ntiles`: Number of tiles processed by a radix pass.
-- `::Val{NWorkers}`: Compile-time number of workers used for per-worker scratch storage.
+- `::Val{NWorkers}`: Compile-time number of workers used for per-worker temporary storage.
 - `::Val{TileSize}`: Compile-time tile size used for local rank storage.
 """
 function initialize_workspace!(ws :: OnesweepWorkspace{KeyT}, nelems :: Int, ntiles :: Int, :: Val{NWorkers}, :: Val{TileSize}) where {KeyT <: Unsigned, NWorkers, TileSize}
@@ -260,6 +311,9 @@ function initialize_workspace!(ws :: OnesweepWorkspace{KeyT}, nelems :: Int, nti
     resize!(ws.global_offsets, 256 * NWorkers)
     resize!(ws.rank_cursors,   256 * NWorkers)
     resize!(ws.local_ranks,   TileSize * NWorkers)
+    resize!(ws.keys,          TileSize * NWorkers)
+    resize!(ws.keys_out,      TileSize * NWorkers)
+    resize!(ws.values_out,    TileSize * NWorkers)
 
     fill!(ws.prepass_counts, zero(UInt32))
     fill!(ws.local_counts, zero(UInt32))
@@ -267,6 +321,9 @@ function initialize_workspace!(ws :: OnesweepWorkspace{KeyT}, nelems :: Int, nti
     fill!(ws.global_offsets, zero(UInt32))
     fill!(ws.rank_cursors, zero(UInt32))
     fill!(ws.local_ranks, zero(UInt32))
+    fill!(ws.keys, zero(KeyT))
+    fill!(ws.keys_out, zero(KeyT))
+    fill!(ws.values_out, zero(UInt32))
 
     return nothing
 end
@@ -298,7 +355,7 @@ Resize and clear the Onesweep workspace for permutation sorting.
 - `ws`: Workspace whose key-sorting and permutation buffers are resized and initialized.
 - `nelems`: Number of elements to sort.
 - `ntiles`: Number of tiles processed by a radix pass.
-- `::Val{NWorkers}`: Compile-time number of workers used for per-worker scratch storage.
+- `::Val{NWorkers}`: Compile-time number of workers used for per-worker temporary storage.
 - `::Val{TileSize}`: Compile-time tile size used for local rank storage.
 """
 function initialize_perm_workspace!(ws :: OnesweepWorkspace{KeyT, KeyV, OffsetV}, nelems :: Int, ntiles :: Int, :: Val{NWorkers}, :: Val{TileSize}) where {KeyT <: Unsigned, KeyV <: Vector{KeyT}, OffsetV <: Vector{UInt32}, NWorkers, TileSize}

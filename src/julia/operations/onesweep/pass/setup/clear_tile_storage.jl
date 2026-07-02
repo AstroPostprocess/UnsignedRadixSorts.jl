@@ -1,15 +1,16 @@
 """
     _clear_tile_storage!(local_counts, local_offsets, rank_cursors, global_offsets)
 
-Clear the per-worker temporary storage used by the next claimed tile.
+Clear the legacy per-worker 256-bucket temporary storage.
 
 Every worker owns a flattened 256-bucket slice. This helper computes
 `_worker_bucket_index(worker_id, bucket)` for each bucket and zeroes the count,
 local prefix, rank cursor, and global scatter base for that worker's next tile.
 
-CUB parallel: these arrays collectively stand in for the agent temporary
-storage used for `bins`, `exclusive_digit_prefix`, rank cursors, and
-`TempStorage_::global_offsets`.
+Legacy reference: the current CPU Process() split clears only the storage that
+must be reset at each stage. This helper is retained for older fused paths that
+clear `bins`, `exclusive_digit_prefix`, rank cursors, and
+`TempStorage_::global_offsets` together.
 
 # Parameters
 
