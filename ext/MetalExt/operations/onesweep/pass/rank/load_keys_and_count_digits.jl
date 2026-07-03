@@ -1,38 +1,50 @@
+using StaticArrays: MVector
+
 """
-    _load_keys_and_count_digits!(src, local_counts, rangemin, tile_len, ::Val{Pass})
+    _load_keys!(keys, src, rangemin, tile_len, ::Val{TileSize}, ::Val{ThreadsPerGroup})
 
-Count the radix digit histogram for the current Metal tile.
+Load one Metal tile into caller-owned fixed-size per-thread key storage.
 
-Each lane walks a strided subset of the tile, extracts the 8-bit digit with
-`_radix_bucket(src[i], Pass)`, and atomically increments the threadgroup-local
-bucket count.
+Each thread owns `cld(TileSize, ThreadsPerGroup)` entries in SIMD-striped input
+order. Valid keys are read from device memory exactly once. Tail entries are
+filled with zero and ignored by later validity guards.
 
-CUB parallel: this covers the count-producing part of `LoadKeys` plus
-`BlockRadixRankT::RankKeys(... CountsCallback(...))`.
+CUB parallel: this is the `LoadKeys(block_idx * TILE_ITEMS, keys)` part of
+`AgentRadixSortOnesweep::Process()`.
 
 # Parameters
 
-- `src`: Active Metal source key buffer for this pass.
-- `local_counts`: Threadgroup-memory bucket histogram updated in-place.
+- `keys`: Caller-owned fixed-size mutable vector receiving cached keys.
+- `src`: Active Metal source key buffer for this radix pass.
 - `rangemin`: First 1-based source index in the claimed tile.
-- `tile_len`: Number of valid items in the tile.
-- `::Val{Pass}`: Compile-time 1-based radix pass selector.
+- `tile_len`: Number of valid keys in the tile.
+- `::Val{TileSize}`: Compile-time tile size.
+- `::Val{ThreadsPerGroup}`: Compile-time Metal threadgroup size.
 """
-function _load_keys_and_count_digits! end
+function _load_keys! end
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function _load_keys_and_count_digits!(src :: KeyV, local_counts :: SharedV, rangemin :: Int, tile_len :: Int, :: Val{Pass}) where {KeyV <: MtlDeviceVector{$KeyT}, SharedV <: MtlDeviceVector{UInt32}, Pass}
-            lane_id = Int(Metal.thread_position_in_threadgroup().x)
-            nlanes = Int(Metal.threads_per_threadgroup().x)
-            local_i = lane_id
-            while local_i <= tile_len
-                i = rangemin + local_i - 1
-                @inbounds bucket = UnsignedRadixSorts._radix_bucket(src[i], Pass)
-                Metal.atomic_fetch_add_explicit(pointer(local_counts, bucket), UInt32(1))
-                local_i += nlanes
+        @inline function _load_keys!(keys :: MVector{ItemsPerThread, $KeyT}, src :: KeyV, rangemin :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{ThreadsPerGroup}) where {ItemsPerThread, KeyV <: MtlDeviceVector{$KeyT}, TileSize, ThreadsPerGroup}
+
+            thread_id = Int(Metal.thread_position_in_threadgroup().x)
+            simd_threads = Int(Metal.threads_per_simdgroup())
+            simd_id = Int(Metal.simdgroup_index_in_threadgroup()) - 1
+            lane_in_simd = Int(Metal.thread_index_in_simdgroup()) - 1
+
+            item = 0
+            while item < ItemsPerThread
+                local_j = simd_id * simd_threads * ItemsPerThread + item * simd_threads + lane_in_simd + 1
+                key = zero($KeyT)
+
+                if local_j <= tile_len
+                    i = rangemin + local_j - 1
+                    @inbounds key = src[i]
+                end
+
+                @inbounds keys[item + 1] = key
+                item += 1
             end
-            Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 
             return nothing
         end

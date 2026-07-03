@@ -4,9 +4,9 @@
 Publish this Metal threadgroup's per-bucket counts as PARTIAL lookback entries.
 
 Each lane publishes a strided subset of buckets. The helper reads the
-threadgroup-local count, packs it with `_partial_entry`, and atomically stores
-it at `_lookback_index(tile_id, bucket)`. Later threadgroups spin on these
-entries while resolving their global offsets.
+threadgroup-local count, packs it with `_partial_entry`, and atomically
+exchanges it at `_lookback_index(tile_id, bucket)`. Later threadgroups spin on
+these entries while resolving their global offsets.
 
 CUB parallel: this is the required `CountsCallback -> LookbackPartial`
 publication of per-tile `bins`.
@@ -26,10 +26,10 @@ publication of per-tile `bins`.
         @inbounds count = local_counts[bucket]
         idx = UnsignedRadixSorts._lookback_index(tile_id, bucket)
         entry = UnsignedRadixSorts._partial_entry(count)
-        Metal.atomic_store_explicit(pointer(lookback, idx), entry)
+        Metal.atomic_exchange_explicit(pointer(lookback, idx), entry)
         bucket += nlanes
     end
-    Metal.threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+    Metal.threadgroup_barrier(Metal.MemoryFlagDevice | Metal.MemoryFlagThreadGroup)
 
     return nothing
 end
