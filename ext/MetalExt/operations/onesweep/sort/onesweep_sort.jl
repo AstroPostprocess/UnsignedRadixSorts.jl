@@ -12,18 +12,23 @@ for (KeyT, NPasses) in (
             ThreadsPerGroup % 32 == 0 || throw(ArgumentError("Metal BlockRadixRank path requires ThreadsPerGroup to be a multiple of 32"))
             ThreadsPerGroup <= 256 || throw(ArgumentError("Metal BlockRadixRank path currently supports ThreadsPerGroup <= 256"))
 
+            # Work partitioning for every pass.
             nelems = length(codes)
             nelems == 0 && return nothing
             ntiles = cld(nelems, TileSize)
 
+            # Allocate/reuse global workspace and prepare the pass-wide bucket
+            # starts used by decoupled lookback.
             resize_base_workspace!(ws, nelems, ntiles)
             prepare_bucket_offsets!(ws, codes, Val(NThreadgroups), Val(ThreadsPerGroup))
 
+            # Launch one 8-bit OneSweep pass per byte of the key type.
             @nexprs $NPasses digit -> begin
                 reset_pass_workspace!(ws)
                 @metal threads=(ThreadsPerGroup,) groups=(NThreadgroups,) onesweep_pass_kernel!(codes, ws, Val(TileSize), Val(ThreadsPerGroup), Val(digit))
             end
 
+            # Odd pass counts leave the final keys in the workspace buffer.
             $(isodd(NPasses) ? :(copyto!(codes, ws.dst)) : :(nothing))
             return nothing
         end
@@ -40,18 +45,24 @@ for (KeyT, NPasses) in (
             ThreadsPerGroup % 32 == 0 || throw(ArgumentError("Metal BlockRadixRank path requires ThreadsPerGroup to be a multiple of 32"))
             ThreadsPerGroup <= 256 || throw(ArgumentError("Metal BlockRadixRank path currently supports ThreadsPerGroup <= 256"))
 
+            # Work partitioning for every pass.
             nelems = length(codes)
             nelems == 0 && return similar(codes, UInt32, 0)
             ntiles = cld(nelems, TileSize)
 
+            # Initialize key/value ping-pong workspace and precompute the
+            # pass-wide bucket starts shared by all permutation passes.
             initialize_perm_workspace_for_sort!(ws, nelems, ntiles, Val(NThreadgroups), Val(ThreadsPerGroup))
             prepare_bucket_offsets!(ws, codes, Val(NThreadgroups), Val(ThreadsPerGroup))
 
+            # Launch one 8-bit OneSweep key/value pass per byte of the key type.
             @nexprs $NPasses digit -> begin
                 reset_pass_workspace!(ws)
                 @metal threads=(ThreadsPerGroup,) groups=(NThreadgroups,) onesweep_perm_pass_kernel!(codes, ws, Val(TileSize), Val(ThreadsPerGroup), Val(digit))
             end
 
+            # Odd pass counts leave the final keys in the workspace buffer;
+            # the returned permutation side must match that final key side.
             $(isodd(NPasses) ? :(copyto!(codes, ws.dst)) : :(nothing))
             return $(isodd(NPasses) ? :(ws.perms[2]) : :(ws.perms[1]))
         end
