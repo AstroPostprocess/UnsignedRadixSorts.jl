@@ -18,8 +18,13 @@ CUDAExt = "CUDA"
 MetalExt = "Metal"
 
 [compat]
-julia = "1.12"
+julia = "1.10"
+Adapt = "4"
+Atomix = "1"
+Reexport = "1"
 StaticArrays = "1"
+CUDA = "5"
+Metal = "1"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
