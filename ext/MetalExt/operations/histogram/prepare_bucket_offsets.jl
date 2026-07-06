@@ -34,7 +34,7 @@ for (KeyT, NPasses, NParts) in (
         #    (pass, bucket) into ws.bucket_offsets.
         # 2. bucket_offsets_exclusive_scan_kernel! converts those counts into
         #    1-based exclusive bucket starts for the later OneSweep pass.
-        function UnsignedRadixSorts.prepare_bucket_offsets!(ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, codes :: CodeV, :: Val{NThreadgroups} = Val(8), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, WorkspaceKeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.prepare_bucket_offsets!(ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, codes :: CodeV, :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, WorkspaceKeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, NThreadgroups, ThreadsPerGroup}
             # Clear CUB's d_bins equivalent. After the histogram kernel this
             # buffer holds counts; after the scan kernel it holds bucket starts.
             fill!(ws.bucket_offsets, zero(UInt32))

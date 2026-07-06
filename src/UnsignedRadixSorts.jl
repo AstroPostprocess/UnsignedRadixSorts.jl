@@ -14,7 +14,6 @@ include(joinpath("julia", "operations", "histogram", "prepare_bucket_offsets.jl"
 include(joinpath("julia", "operations", "onesweep", "pass", "setup", "select_pass_key_buffers.jl"))
 include(joinpath("julia", "operations", "onesweep", "pass", "setup", "select_pass_key_value_buffers.jl"))
 include(joinpath("julia", "operations", "onesweep", "pass", "setup", "claim_next_tile.jl"))
-include(joinpath("julia", "operations", "onesweep", "pass", "setup", "clear_tile_storage.jl"))
 include(joinpath("julia", "operations", "onesweep", "pass", "rank", "load_keys_and_count_digits.jl"))
 include(joinpath("julia", "operations", "onesweep", "pass", "rank", "rank_keys_local.jl"))
 include(joinpath("julia", "operations", "onesweep", "pass", "lookback", "publish_lookback_partial.jl"))

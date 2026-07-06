@@ -3,11 +3,11 @@
 
 Scatter CUB `s.keys_out` entries and paired permutation values.
 
-This mirrors CUB `ScatterKeysGlobal()` followed by
-`GatherScatterValues(ranks, bool_constant_v<KEYS_ONLY>)`: staged keys are
-written globally first, values are loaded in original tile order, scattered to
-`s.values_out[rank]`, and then written to `d_values_out` at the same global
-positions as the sorted keys.
+This mirrors CUB `ScatterKeysGlobal()` and
+`GatherScatterValues(ranks, bool_constant_v<KEYS_ONLY>)`: values are loaded in
+original tile order and scattered to `s.values_out[rank]`; then staged keys and
+values are written to their shared global positions in one pass over sorted
+tile order.
 
 # Parameters
 
@@ -33,17 +33,7 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64, UInt128)
             tile_base = TileSize * (worker_id - 1)
 
             # -----------------------------------------------------
-            # 1. ScatterKeysGlobal: s.keys_out -> d_keys_out.
-            @inbounds for sorted_idx0 in UInt32(0):UInt32(tile_len - 1)
-                key = keys_out[tile_base + Int(sorted_idx0) + 1]
-                bucket = _radix_bucket(key, Pass)
-                idx_wb = _worker_bucket_index(worker_id, bucket)
-                scatter_idx = global_offsets[idx_wb] + sorted_idx0
-                dst[Int(scatter_idx)] = key
-            end
-
-            # -----------------------------------------------------
-            # 2. LoadValues + ScatterValuesShared.
+            # 1. LoadValues + ScatterValuesShared.
             #
             # Load permutation values in original tile order and stage them as
             # s.values_out[rank], using the same ranks as keys.
@@ -54,36 +44,19 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64, UInt128)
             end
 
             # -----------------------------------------------------
-            # 3. ScatterValuesGlobal: s.values_out -> d_values_out.
+            # 2. ScatterKeysGlobal + ScatterValuesGlobal.
+            #
+            # Both outputs use the same sorted key bucket and sorted_idx0, so
+            # compute the global position once and write the paired key/value.
             @inbounds for sorted_idx0 in UInt32(0):UInt32(tile_len - 1)
-                key = keys_out[tile_base + Int(sorted_idx0) + 1]
+                sorted_idx = tile_base + Int(sorted_idx0) + 1
+                key = keys_out[sorted_idx]
                 bucket = _radix_bucket(key, Pass)
                 idx_wb = _worker_bucket_index(worker_id, bucket)
                 scatter_idx = global_offsets[idx_wb] + sorted_idx0
-                perm_dst[Int(scatter_idx)] = values_out[tile_base + Int(sorted_idx0) + 1]
-            end
-
-            return nothing
-        end
-    end
-end
-
-# Legacy pre-keys_out path retained for callers that still scatter keys and
-# values directly from the source tile.
-for KeyT in (UInt8, UInt16, UInt32, UInt64, UInt128)
-    @eval begin
-        @inline function _scatter_key_values_global!(src :: KeyV, dst :: KeyV, perm_src :: OffsetV, perm_dst :: OffsetV, global_offsets :: OffsetV, local_ranks :: OffsetV, rangemin :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: Vector{$KeyT}, OffsetV <: Vector{UInt32}, TileSize, Pass}
-            worker_id = _worker_id()
-            tile_base = TileSize * (worker_id - 1)
-            rangemax = rangemin + tile_len - 1
-
-            @inbounds for i in rangemin:rangemax
-                rank_idx = tile_base + i - rangemin + 1
-                bucket = _radix_bucket(src[i], Pass)
-                idx_wb = _worker_bucket_index(worker_id, bucket)
-                scatter_idx = global_offsets[idx_wb] + local_ranks[rank_idx]
-                dst[Int(scatter_idx)] = src[i]
-                perm_dst[Int(scatter_idx)] = perm_src[i]
+                output_idx = Int(scatter_idx)
+                dst[output_idx] = key
+                perm_dst[output_idx] = values_out[sorted_idx]
             end
 
             return nothing

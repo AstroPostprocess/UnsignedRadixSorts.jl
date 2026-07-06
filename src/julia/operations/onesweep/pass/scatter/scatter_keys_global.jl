@@ -75,25 +75,3 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64, UInt128)
         end
     end
 end
-
-# Legacy pre-keys_out path retained for callers that still compute CUB-style
-# ranks but scatter directly from the source tile.
-for KeyT in (UInt8, UInt16, UInt32, UInt64, UInt128)
-    @eval begin
-        @inline function _scatter_keys_global!(src :: KeyV, dst :: KeyV, global_offsets :: OffsetV, local_ranks :: OffsetV, rangemin :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{Pass}) where {KeyV <: Vector{$KeyT}, OffsetV <: Vector{UInt32}, TileSize, Pass}
-            worker_id = _worker_id()
-            tile_base = TileSize * (worker_id - 1)
-            rangemax = rangemin + tile_len - 1
-
-            @inbounds for i in rangemin:rangemax
-                rank_idx = tile_base + i - rangemin + 1
-                bucket = _radix_bucket(src[i], Pass)
-                idx_wb = _worker_bucket_index(worker_id, bucket)
-                scatter_idx = global_offsets[idx_wb] + local_ranks[rank_idx]
-                dst[Int(scatter_idx)] = src[i]
-            end
-
-            return nothing
-        end
-    end
-end

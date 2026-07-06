@@ -5,7 +5,7 @@ for (KeyT, NPasses) in (
         (UInt64,  8),
     )
     @eval begin
-        function UnsignedRadixSorts.onesweep_sort!(codes :: CodeV, ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(8), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, WorkspaceKeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.onesweep_sort!(codes :: CodeV, ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, WorkspaceKeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
             TileSize > 0 || throw(ArgumentError("TileSize must be positive"))
             NThreadgroups > 0 || throw(ArgumentError("NThreadgroups must be positive"))
             ThreadsPerGroup >= 32 || throw(ArgumentError("ThreadsPerGroup must be at least one Metal SIMD group"))
@@ -33,12 +33,12 @@ for (KeyT, NPasses) in (
             return nothing
         end
 
-        function UnsignedRadixSorts.onesweep_sort!(codes :: CodeV, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(8), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, TileSize, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.onesweep_sort!(codes :: CodeV, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, TileSize, NThreadgroups, ThreadsPerGroup}
             Workspace = OnesweepWorkspace(MtlVector{$KeyT})
             return onesweep_sort!(codes, Workspace, Val(TileSize), Val(NThreadgroups), Val(ThreadsPerGroup))
         end
 
-        function UnsignedRadixSorts.onesweep_sortperm!(codes :: CodeV, ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(8), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, WorkspaceKeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.onesweep_sortperm!(codes :: CodeV, ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, WorkspaceKeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
             TileSize > 0 || throw(ArgumentError("TileSize must be positive"))
             NThreadgroups > 0 || throw(ArgumentError("NThreadgroups must be positive"))
             ThreadsPerGroup >= 32 || throw(ArgumentError("ThreadsPerGroup must be at least one Metal SIMD group"))
@@ -67,7 +67,7 @@ for (KeyT, NPasses) in (
             return $(isodd(NPasses) ? :(ws.perms[2]) : :(ws.perms[1]))
         end
 
-        function UnsignedRadixSorts.onesweep_sortperm!(codes :: CodeV, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(8), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, TileSize, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.onesweep_sortperm!(codes :: CodeV, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, TileSize, NThreadgroups, ThreadsPerGroup}
             Workspace = OnesweepWorkspace(MtlVector{$KeyT})
             return onesweep_sortperm!(codes, Workspace, Val(TileSize), Val(NThreadgroups), Val(ThreadsPerGroup))
         end
