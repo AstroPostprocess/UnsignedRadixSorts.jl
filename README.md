@@ -4,7 +4,7 @@
 
 The implementation follows the high-level structure of CUB/CCCL’s OneSweep radix sort: each radix pass computes tile-local ranks, publishes per-tile counts, resolves global offsets through decoupled lookback, and scatters keys to the output side of a ping-pong buffer. The CPU implementation is threaded. CUDA and Metal support are provided through Julia package extensions.
 
-Status
+## Status
 
 `UnsignedRadixSorts.jl` is currently experimental. The CPU backend is the primary implementation. CUDA and Metal support are provided for backend-resident workflows where avoiding host-device round trips may be more important than matching specialised vendor-style sorting libraries.
 
