@@ -133,7 +133,7 @@ is represented by the early `local_counts` reduction and
 
 # Parameters
 
-- `ranks`: Per-thread stable tile-local ranks corresponding to `keys`.
+- `ranks`: Threadgroup stable tile-local ranks indexed by original tile-local input position.
 - `keys`: Per-thread cached keys in SIMD-striped input order.
 - `simd_offsets`: Threadgroup per-SIMD bucket counts, later overwritten with cursors.
 - `local_counts`: Threadgroup tile counts for all 256 buckets.
@@ -152,7 +152,7 @@ function _rank_keys_early_counts! end
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
-        @inline function _rank_keys_early_counts!(ranks :: MVector{ItemsPerThread, UInt32}, keys :: MVector{ItemsPerThread, $KeyT}, simd_offsets :: SharedV, local_counts :: SharedV, local_offsets :: SharedV, scan_scratch :: SharedV, match_scratch :: SharedV, lookback :: OffsetV, tile_id :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{ThreadsPerGroup}, :: Val{Pass}) where {ItemsPerThread, SharedV <: MtlDeviceVector{UInt32}, OffsetV <: MtlDeviceVector{UInt32}, TileSize, ThreadsPerGroup, Pass}
+        @inline function _rank_keys_early_counts!(ranks :: SharedV, keys :: MVector{ItemsPerThread, $KeyT}, simd_offsets :: SharedV, local_counts :: SharedV, local_offsets :: SharedV, scan_scratch :: SharedV, match_scratch :: SharedV, lookback :: OffsetV, tile_id :: Int, tile_len :: Int, :: Val{TileSize}, :: Val{ThreadsPerGroup}, :: Val{Pass}) where {ItemsPerThread, SharedV <: MtlDeviceVector{UInt32}, OffsetV <: MtlDeviceVector{UInt32}, TileSize, ThreadsPerGroup, Pass}
             NSimdgroups = ThreadsPerGroup ÷ 32
 
             thread_id = Int(Metal.thread_position_in_threadgroup().x)
@@ -290,7 +290,9 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
 
                 # Broadcast the leader's cursor to the whole peer group.
                 simd_bucket_prefix = _broadcast_peer_leader(simd_bucket_prefix, leader_lane, match_scratch, simd_id, lane_in_simd, simd_threads)
-                @inbounds ranks[item + 1] = valid ? simd_bucket_prefix + peer_prefix : zero(UInt32)
+                if valid
+                    @inbounds ranks[local_j] = simd_bucket_prefix + peer_prefix
+                end
                 item += 1
             end
 

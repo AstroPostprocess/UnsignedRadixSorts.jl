@@ -25,7 +25,13 @@ for (KeyT, NPasses) in (
             # Launch one 8-bit OneSweep pass per byte of the key type.
             @nexprs $NPasses digit -> begin
                 reset_pass_workspace!(ws)
-                @metal threads=(ThreadsPerGroup,) groups=(NThreadgroups,) onesweep_pass_kernel!(codes, ws, Val(TileSize), Val(ThreadsPerGroup), Val(digit))
+                @metal threads=(ThreadsPerGroup,) groups=(NThreadgroups,) onesweep_pass_kernel!(
+                    codes,
+                    ws,
+                    Val(TileSize),
+                    Val(ThreadsPerGroup),
+                    Val(digit),
+                )
             end
 
             # Odd pass counts leave the final keys in the workspace buffer.
@@ -58,7 +64,13 @@ for (KeyT, NPasses) in (
             # Launch one 8-bit OneSweep key/value pass per byte of the key type.
             @nexprs $NPasses digit -> begin
                 reset_pass_workspace!(ws)
-                @metal threads=(ThreadsPerGroup,) groups=(NThreadgroups,) onesweep_perm_pass_kernel!(codes, ws, Val(TileSize), Val(ThreadsPerGroup), Val(digit))
+                @metal threads=(ThreadsPerGroup,) groups=(NThreadgroups,) onesweep_perm_pass_kernel!(
+                    codes,
+                    ws,
+                    Val(TileSize),
+                    Val(ThreadsPerGroup),
+                    Val(digit),
+                )
             end
 
             # Odd pass counts leave the final keys in the workspace buffer;

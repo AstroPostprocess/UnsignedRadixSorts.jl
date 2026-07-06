@@ -33,10 +33,21 @@ using StaticArrays: MVector
 ##       GatherScatterValues(ranks, bool_constant_v<KEYS_ONLY>);
 ##   }
 ##
-## The stage order, per-thread cached keys/ranks, early counts publication,
-## shared key staging, lookback, and global scatter follow the CUDA version.
-## Metal-specific substitutions are limited to backend intrinsics. The default
-## Metal policy uses TileSize=2048 to fit the 32 KiB threadgroup-memory budget.
+## This file intentionally keeps the CUDAExt/CUB stage order and helper names.
+## The only algorithmic deviation in the current Metal baseline is the staging
+## between RankKeys and ScatterKeysGlobal:
+##
+## - CUDAExt keeps `ranks` in per-thread register storage, writes
+##   `keys_out[rank] = key`, and then scatters the sorted shared tile.
+## - MetalExt writes ranks to threadgroup memory indexed by the original
+##   tile-local input position, skips the `keys_out` shared permutation, and
+##   re-reads source keys during global scatter.
+##
+## The re-read staging is deliberate. It avoids the Metal.jl path that was found
+## unstable for `MVector ranks -> keys_out` shared permutation while preserving
+## the OneSweep invariant
+##
+##   output = global_bucket_base + previous_tile_count + stable_tile_rank.
 
 for KeyT in (UInt8, UInt16, UInt32, UInt64)
     @eval begin
@@ -61,20 +72,23 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             # local_offsets  ~= exclusive_digit_prefix
             # scan_scratch   ~= RankKeys scan storage for SIMD totals
             # match_scratch  ~= Metal replacement storage for WARP_MATCH_ANY
-            # global_offsets ~= TempStorage_::global_offsets
+            # global_offsets ~= TempStorage_::global_offsets, reused as
+            #                   RankKeys scan storage before lookback fills it
             # claimed_tile   ~= TempStorage_::block_idx
-            # keys_out       ~= TempStorage_::keys_out
+            # ranks          ~= Metal-safe tile-local ranks, indexed by the
+            #                   original tile-local input position
             simd_offsets = Metal.MtlThreadGroupArray(UInt32, NSimdgroups * 256)
             local_counts = Metal.MtlThreadGroupArray(UInt32, 256)
             local_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
             scan_scratch = Metal.MtlThreadGroupArray(UInt32, NSimdgroups)
             match_scratch = Metal.MtlThreadGroupArray(UInt32, ThreadsPerGroup)
             global_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
-            keys_out = Metal.MtlThreadGroupArray($KeyT, TileSize)
             claimed_tile = Metal.MtlThreadGroupArray(UInt32, 1)
+            ranks = Metal.MtlThreadGroupArray(UInt32, TileSize)
 
             # Threadgroup memory with UInt64 keys and ThreadsPerGroup=256 is
-            # 28,708 bytes, below Metal's 32 KiB limit.
+            # kept below Apple's 32 KiB limit by not allocating CUB-style
+            # keys_out/value_out payload storage in this baseline.
             while true
                 # 1. Agent construction before Process(): claim a tile.
                 #
@@ -93,25 +107,54 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
 
                 # 2. Process(): LoadKeys.
                 #
-                # Keys are loaded once into per-thread register storage using the
-                # same SIMD-striped ownership that the rank helper uses later.
+                # Keys are loaded into per-thread register storage using the same
+                # SIMD-striped ownership that the rank helper uses later. Unlike
+                # CUDAExt, these cached keys are not used by a shared permutation
+                # stage; global scatter re-reads the source buffer for stability.
                 _clear_rank_storage!(simd_offsets)
                 keys = zero(MVector{ItemsPerThread, $KeyT})
-                ranks = zero(MVector{ItemsPerThread, UInt32})
-                _load_keys!(keys, src, rangemin, tile_len, Val(TileSize), Val(ThreadsPerGroup))
+                _load_keys!(
+                    keys,
+                    src,
+                    rangemin,
+                    tile_len,
+                    Val(TileSize),
+                    Val(ThreadsPerGroup),
+                )
 
                 # 3. Process(): BlockRadixRankT::RankKeys with CountsCallback.
                 #
                 # This helper computes per-tile bins, publishes LookbackPartial
                 # as soon as those bins are known, scans bins into
                 # exclusive_digit_prefix, and writes stable tile-local ranks.
-                _rank_keys_early_counts!(ranks, keys, simd_offsets, local_counts, local_offsets, scan_scratch, match_scratch, ws.lookback, tile_id, tile_len, Val(TileSize), Val(ThreadsPerGroup), Val(Pass))
+                #
+                # Metal-specific staging: ranks are written to threadgroup memory
+                # at `ranks[local_j]`, where `local_j` is the original tile-local
+                # input position. This replaces CUDAExt's per-thread `MVector`
+                # ranks and is the anchor used by the re-read scatter stage.
+                _rank_keys_early_counts!(
+                    ranks,
+                    keys,
+                    simd_offsets,
+                    local_counts,
+                    local_offsets,
+                    scan_scratch,
+                    match_scratch,
+                    ws.lookback,
+                    tile_id,
+                    tile_len,
+                    Val(TileSize),
+                    Val(ThreadsPerGroup),
+                    Val(Pass),
+                )
 
                 # 4. Process(): ScatterKeysShared.
                 #
-                # CUB stages keys into s.keys_out by rank so global scatter can
-                # read the tile in digit-sorted order.
-                _scatter_keys_shared!(keys_out, keys, ranks, tile_len, Val(TileSize), Val(ThreadsPerGroup))
+                # CUDAExt performs `keys_out[rank] = key` here so later global
+                # scatter can walk a digit-sorted shared tile. MetalExt deliberately
+                # skips this stage: the `MVector ranks -> keys_out` permutation was
+                # the unstable path on Metal. The helper name is still kept in
+                # scatter_keys_global.jl for layout parity with CUDAExt.
 
                 # 5. Process(): LoadBinsToOffsetsGlobal -> LookbackGlobal
                 #    -> UpdateBinsGlobal.
@@ -119,14 +162,32 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 # The decoupled lookback path combines the pass-wide bucket base,
                 # this tile's exclusive_digit_prefix, and previous tiles'
                 # same-bucket counts into global_offsets.
-                _resolve_lookback_global_offsets!(ws.lookback, ws.bucket_offsets, local_counts, local_offsets, global_offsets, tile_id, Val(Pass))
+                _resolve_lookback_global_offsets!(
+                    ws.lookback,
+                    ws.bucket_offsets,
+                    local_counts,
+                    local_offsets,
+                    global_offsets,
+                    tile_id,
+                    Val(Pass),
+                )
 
                 # 6. Process(): ScatterKeysGlobal.
                 #
-                # Sorted threadgroup keys are written to d_keys_out at
-                # sorted_idx + s.global_offsets[Digit(key)]. Keys-only sorting
-                # has no value path, so GatherScatterValues is a no-op.
-                _scatter_keys_global!(keys_out, dst, global_offsets, tile_len, Val(TileSize), Val(ThreadsPerGroup), Val(Pass))
+                # Metal-safe re-read staging: each thread walks original tile order,
+                # re-loads `src[rangemin + local_i - 1]`, and combines the saved
+                # `ranks[local_i]` with the lookback-resolved global bucket base.
+                # This costs one extra sequential source read but avoids the shared
+                # key permutation that is used by CUDAExt.
+                _scatter_keys_global!(
+                    src,
+                    dst,
+                    global_offsets,
+                    ranks,
+                    rangemin,
+                    tile_len,
+                    Val(Pass),
+                )
             end
 
             return nothing
@@ -144,23 +205,20 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
             ntiles = cld(nelems, TileSize)
 
             # Same CUB agent temporary-storage mapping as the keys-only pass.
-            # UInt8/UInt16 allocate a separate UInt32 values_out staging array
-            # because one key slot is narrower than one permutation value.
-            # UInt32/UInt64 reuse the key staging array after all sorted keys
-            # have been read.
+            # MetalExt keeps ranks in threadgroup memory and avoids CUB's
+            # keys_out/values_out shared permutation payloads.
             simd_offsets = Metal.MtlThreadGroupArray(UInt32, NSimdgroups * 256)
             local_counts = Metal.MtlThreadGroupArray(UInt32, 256)
             local_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
             scan_scratch = Metal.MtlThreadGroupArray(UInt32, NSimdgroups)
             match_scratch = Metal.MtlThreadGroupArray(UInt32, ThreadsPerGroup)
             global_offsets = Metal.MtlThreadGroupArray(UInt32, 256)
-            keys_out = Metal.MtlThreadGroupArray($KeyT, TileSize)
             claimed_tile = Metal.MtlThreadGroupArray(UInt32, 1)
-            $(sizeof(KeyT) < sizeof(UInt32) ? :(values_out = Metal.MtlThreadGroupArray(UInt32, TileSize)) : :(nothing))
+            ranks = Metal.MtlThreadGroupArray(UInt32, TileSize)
 
-            # The UInt64 sortperm path has the same 28,708-byte threadgroup
-            # footprint as key-only sorting because it reuses per-thread keys
-            # as the value staging source.
+            # The sortperm pass uses the same re-read staging as keys-only
+            # sorting.  Both keys and permutation values are read in original
+            # tile order and scattered through the saved ranks.
             while true
                 # 1. Agent construction before Process(): claim a tile.
                 tile_id = _claim_next_tile!(ws.tile_counter, claimed_tile)
@@ -173,29 +231,65 @@ for KeyT in (UInt8, UInt16, UInt32, UInt64)
                 # 2. Process(): LoadKeys.
                 _clear_rank_storage!(simd_offsets)
                 keys = zero(MVector{ItemsPerThread, $KeyT})
-                ranks = zero(MVector{ItemsPerThread, UInt32})
-                _load_keys!(keys, src, rangemin, tile_len, Val(TileSize), Val(ThreadsPerGroup))
+                _load_keys!(
+                    keys,
+                    src,
+                    rangemin,
+                    tile_len,
+                    Val(TileSize),
+                    Val(ThreadsPerGroup),
+                )
 
                 # 3. Process(): RankKeys with CountsCallback and early
                 # LookbackPartial publication.
-                _rank_keys_early_counts!(ranks, keys, simd_offsets, local_counts, local_offsets, scan_scratch, match_scratch, ws.lookback, tile_id, tile_len, Val(TileSize), Val(ThreadsPerGroup), Val(Pass))
+                _rank_keys_early_counts!(
+                    ranks,
+                    keys,
+                    simd_offsets,
+                    local_counts,
+                    local_offsets,
+                    scan_scratch,
+                    match_scratch,
+                    ws.lookback,
+                    tile_id,
+                    tile_len,
+                    Val(TileSize),
+                    Val(ThreadsPerGroup),
+                    Val(Pass),
+                )
 
                 # 4. Process(): ScatterKeysShared.
-                _scatter_keys_shared!(keys_out, keys, ranks, tile_len, Val(TileSize), Val(ThreadsPerGroup))
+                # Deliberately skipped for the same reason as the keys-only pass.
 
                 # 5. Process(): LoadBinsToOffsetsGlobal -> LookbackGlobal
                 #    -> UpdateBinsGlobal.
-                _resolve_lookback_global_offsets!(ws.lookback, ws.bucket_offsets, local_counts, local_offsets, global_offsets, tile_id, Val(Pass))
+                _resolve_lookback_global_offsets!(
+                    ws.lookback,
+                    ws.bucket_offsets,
+                    local_counts,
+                    local_offsets,
+                    global_offsets,
+                    tile_id,
+                    Val(Pass),
+                )
 
                 # 6. Process(): ScatterKeysGlobal, then GatherScatterValues.
                 #
-                # Keys are written first. The value path then loads permutation
-                # values in original tile order, scatters them through
-                # threadgroup memory by the retained ranks, and writes them to
-                # the same global positions as their keys.
-                $(sizeof(KeyT) < sizeof(UInt32) ?
-                    :(_scatter_key_values_global!(keys_out, values_out, keys, ranks, dst, perm_src, perm_dst, global_offsets, rangemin, tile_len, Val(TileSize), Val(ThreadsPerGroup), Val(Pass))) :
-                    :(_scatter_key_values_global!(keys_out, keys, ranks, dst, perm_src, perm_dst, global_offsets, rangemin, tile_len, Val(TileSize), Val(ThreadsPerGroup), Val(Pass))))
+                # CUDAExt stages keys and values through sorted shared payloads.
+                # MetalExt re-reads keys and permutation values from the original
+                # source positions, uses `ranks[local_i]` for the same stable tile
+                # order, and writes both outputs to identical scatter positions.
+                _scatter_key_values_global!(
+                    src,
+                    dst,
+                    perm_src,
+                    perm_dst,
+                    global_offsets,
+                    ranks,
+                    rangemin,
+                    tile_len,
+                    Val(Pass),
+                )
             end
 
             return nothing
