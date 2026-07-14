@@ -27,7 +27,8 @@ include(joinpath(@__DIR__, "MetalExt", "operations", "onesweep", "pass", "scatte
 include(joinpath(@__DIR__, "MetalExt", "operations", "onesweep", "pass", "scatter", "scatter_key_values_global.jl"))
 
 include(joinpath(@__DIR__, "MetalExt", "operations", "onesweep", "pass", "onesweep_pass.jl"))
-include(joinpath(@__DIR__, "MetalExt", "operations", "onesweep", "sort", "onesweep_sort.jl"))
+include(joinpath(@__DIR__, "MetalExt", "operations", "onesweep", "pass", "onesweep_direct_pass.jl"))
+include(joinpath(@__DIR__, "MetalExt", "operations", "radix_sort.jl"))
 
 
 end

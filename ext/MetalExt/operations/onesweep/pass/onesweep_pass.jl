@@ -1,6 +1,10 @@
 using StaticArrays: MVector
 
-## Metal port of CCCL's AgentRadixSortOnesweep::Process().
+## Legacy fused Metal port of CCCL's AgentRadixSortOnesweep::Process().
+##
+## This kernel is retained as a diagnostic/reference implementation. Public
+## Metal sorting uses `onesweep_direct_pass.jl`, whose separate rank, prefix,
+## and scatter dispatches do not require cross-threadgroup forward progress.
 ##
 ## Local CCCL reference:
 ##

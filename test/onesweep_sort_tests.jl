@@ -103,7 +103,7 @@ function onesweep_extreme_mix(::Type{T}) where {T<:Unsigned}
     ]
 end
 
-function run_onesweep_sort_case(original::Vector{T}, tile_size::Int=4096) where {T<:Unsigned}
+function run_onesweep_sort_case(original::Vector{T}, tile_size::Int=8192) where {T<:Unsigned}
     codes = copy(original)
     result = onesweep_sort!(codes, Val(tile_size))
 
@@ -111,7 +111,7 @@ function run_onesweep_sort_case(original::Vector{T}, tile_size::Int=4096) where 
     @test codes == sort(collect(original))
 end
 
-function run_onesweep_sort_workspace_case(original::Vector{T}, tile_size::Int=4096) where {T<:Unsigned}
+function run_onesweep_sort_workspace_case(original::Vector{T}, tile_size::Int=8192) where {T<:Unsigned}
     codes = copy(original)
     ws = OnesweepWorkspace(Vector{T})
     result = onesweep_sort!(codes, ws, Val(tile_size))
@@ -123,7 +123,7 @@ function run_onesweep_sort_workspace_case(original::Vector{T}, tile_size::Int=40
     @test length(ws.lookback) == 256 * cld(length(original), tile_size)
 end
 
-function run_onesweep_sortperm_case(original::Vector{T}, tile_size::Int=4096) where {T<:Unsigned}
+function run_onesweep_sortperm_case(original::Vector{T}, tile_size::Int=8192) where {T<:Unsigned}
     codes = copy(original)
     order = onesweep_sortperm!(codes, Val(tile_size))
     expected_order = sortperm(original, alg=Base.Sort.DEFAULT_STABLE)
@@ -134,7 +134,7 @@ function run_onesweep_sortperm_case(original::Vector{T}, tile_size::Int=4096) wh
     @test eltype(order) == UInt32
 end
 
-function run_onesweep_sortperm_workspace_case(original::Vector{T}, tile_size::Int=4096) where {T<:Unsigned}
+function run_onesweep_sortperm_workspace_case(original::Vector{T}, tile_size::Int=8192) where {T<:Unsigned}
     codes = copy(original)
     ws = OnesweepWorkspace(Vector{T})
     order = onesweep_sortperm!(codes, ws, Val(tile_size))

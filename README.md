@@ -1,8 +1,8 @@
 # UnsignedRadixSorts.jl
 
-`UnsignedRadixSorts.jl` is an experimental radix sorting package for unsigned integer keys in Julia. It implements an 8-bit LSD [OneSweep](https://arxiv.org/abs/2206.01784)-style radix sorter for in-place key sorting and permutation sorting, with CPU, CUDA, and Metal backends. The package is intended as a lightweight sorting primitive for workflows where unsigned integer keys, such as Morton codes, are already available in memory and need to be reordered without leaving the active backend.
+`UnsignedRadixSorts.jl` is an experimental radix sorting package for unsigned integer keys in Julia. CPU and CUDA provide an 8-bit LSD [OneSweep](https://arxiv.org/abs/2206.01784)-style sorter, while Metal provides a forward-progress-safe radix sorter for Apple GPUs. The package is intended as a lightweight sorting primitive for workflows where unsigned integer keys, such as Morton codes, are already available in memory and need to be reordered without leaving the active backend.
 
-The implementation follows the high-level structure of CUB/CCCL’s OneSweep radix sort: each radix pass computes tile-local ranks, publishes per-tile counts, resolves global offsets through decoupled lookback, and scatters keys to the output side of a ping-pong buffer. The CPU implementation is threaded. CUDA and Metal support are provided through Julia package extensions.
+Each radix pass computes tile-local ranks and per-tile counts, resolves global offsets, and scatters keys to the output side of a ping-pong buffer. The CPU implementation is threaded; CUDA and Metal support are provided through Julia package extensions.
 
 ## Status
 
@@ -10,7 +10,7 @@ The implementation follows the high-level structure of CUB/CCCL’s OneSweep rad
 
 For users primarily looking for maximum CUDA sorting performance, [`KernelForge.jl`](https://github.com/epilliat/KernelForge.jl) is currently the more appropriate choice. It is faster and more mature for CUDA workloads. `UnsignedRadixSorts.jl` is not intended to replace mature CUDA-focused sorting libraries; its goal is to provide a small unsigned-integer sorting primitive with a consistent API across CPU, CUDA, and Metal.
 
-The Metal backend uses a Metal-safe reread-scatter staging path instead of the CUDA-style shared keys_out[rank] staging path. This is intended to preserve correctness on Apple GPUs, but it is not expected to match CUDA/CUB-level performance, especially for small arrays where Metal launch and pass overhead dominate.
+The Metal backend uses separate `radix_sort!` and `radix_sortperm!` entry points because its implementation is no longer OneSweep. Metal launch overhead can dominate small arrays.
 
 The public API and backend performance characteristics may still change before a stable 1.0 release.
 
@@ -18,10 +18,12 @@ The public API and backend performance characteristics may still change before a
 
 ## Usage
 
-The package exposes two main entry points:
+CPU and CUDA expose:
 
 - `onesweep_sort!(codes)` for in-place sorting of unsigned integer keys
 - `onesweep_sortperm!(codes)` for in-place sorting of keys while returning the corresponding 1-based source permutation indices
+
+Metal exposes the corresponding `radix_sort!` and `radix_sortperm!` entry points.
 
 Supported key types are unsigned integer vectors. The CPU implementation supports `UInt8`, `UInt16`, `UInt32`, `UInt64`, and `UInt128`. The CUDA and Metal extensions currently target `UInt8`, `UInt16`, `UInt32`, and `UInt64` device vectors.
 
@@ -77,16 +79,9 @@ ws = OnesweepWorkspace(Vector{UInt32})
 onesweep_sort!(keys, ws)
 ```
 
-The default CPU tile size is `4096`, but it can be supplied as a compile-time value:
-
-```julia
-onesweep_sort!(keys, Val(4096))
-onesweep_sortperm!(keys, Val(4096))
-```
-
-
-
 ## CUDA and Metal backends
+
+### CUDA: `onesweep_sort!`
 
 CUDA support is loaded through `CUDAExt` when `CUDA.jl` is available:
 
@@ -108,6 +103,8 @@ onesweep_sort!(keys, Val(4096), Val(256), Val(256))
 
 where the arguments are tile size, number of CUDA blocks, and threads per block.
 
+### Metal: `radix_sort!`
+
 Metal support is loaded through `MetalExt` when `Metal.jl` is available:
 
 ```julia
@@ -116,17 +113,17 @@ using Metal
 
 keys = MtlVector(rand(UInt64, 1_000_000))
 
-onesweep_sort!(keys)
+radix_sort!(keys)
 Metal.synchronize()
 ```
 
-The Metal entry points use a smaller default tile size and expose the number of threadgroups and threads per threadgroup:
+The Metal entry points also accept tile size, number of threadgroups, and threads per threadgroup:
 
 ```julia
-onesweep_sort!(keys, Val(2048), Val(128), Val(256))
+radix_sort!(keys, Val(2048), Val(128), Val(256))
 ```
 
-The Metal backend is experimental. It is mainly intended for GPU-resident workflows where keys are already on Apple GPU memory and the sorted result is consumed by later GPU kernels. It should not be interpreted as a drop-in replacement for highly tuned CPU sorting on small arrays.
+Use `radix_sortperm!` when stable source permutation indices are required. The Metal backend is experimental and is mainly intended for GPU-resident workflows.
 
 
 
@@ -146,8 +143,8 @@ Each pass uses 256 buckets. The high-level pass structure is:
 2. **Tile claiming**: workers or GPU threadgroups dynamically claim tiles of the input.
 3. **Key loading**: load the current tile from the active ping-pong source buffer.
 4. **Local ranking**: compute stable tile-local ranks within each radix bucket.
-5. **Partial publication**: publish per-tile bucket counts into a packed lookback table.
-6. **Decoupled lookback**: scan previous tiles' same-bucket counts to obtain each tile's global prefix.
+5. **Count publication**: publish per-tile bucket counts.
+6. **Global prefix resolution**: resolve the number of earlier keys in each radix bucket.
 7. **Global scatter**: write keys to the active destination buffer using the bucket start, previous-tile prefix, and local rank.
 8. **Ping-pong pass iteration**: alternate between the original key buffer and workspace destination buffer for each radix byte.
 
@@ -169,17 +166,13 @@ The package contains three related implementations:
 
 1. CPU backend: threaded Julia implementation using reusable workspace buffers and Atomix counters.
 2. CUDA backend: CUDA extension following a CUB-like OneSweep staging path using shared-memory key exchange.
-3. Metal backend: Metal extension following the same OneSweep lookback structure, but with a Metal-specific scatter staging path.
+3. Metal backend: Metal extension using a forward-progress-safe multi-dispatch radix pass.
 
 The CUDA backend follows the CUB/CCCL-style tile flow closely: keys and ranks are kept in thread-private storage, keys are staged through a shared `keys_out[rank]` permutation buffer, and global scatter reads the locally reordered tile.
 
-The Metal backend intentionally differs at this point. The CUDA-style path
-
-```text
-MVector ranks -> keys_out[rank] = key -> global scatter
-```
-
-has been unstable on Metal. The Metal implementation therefore stages local ranks in threadgroup memory and rereads keys from the source buffer during global scatter. This adds a sequential source read, but keeps the decoupled-lookback OneSweep invariant intact and has been the more reliable path for large GPU-resident sorts on Apple GPUs.
+Metal uses separate rank, prefix, and scatter dispatches so it does not depend
+on cross-threadgroup forward progress. This is why its public entry points are
+named `radix_sort!` and `radix_sortperm!` rather than OneSweep.
 
 Compared with a full production sorting library, this package intentionally keeps the scope narrow:
 
@@ -189,4 +182,3 @@ Compared with a full production sorting library, this package intentionally keep
 4. No comparison-based fallback path inside the package API.
 5. No signed integer, floating-point, custom-order, or key-value payload API beyond source-index permutation sorting.
 6. Metal support is correctness-oriented and experimental, especially for small arrays where fixed launch and pass overheads dominate.
-
