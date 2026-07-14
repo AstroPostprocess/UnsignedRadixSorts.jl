@@ -5,7 +5,7 @@ for (KeyT, NPasses) in (
         (UInt64,  8),
     )
     @eval begin
-        function UnsignedRadixSorts.onesweep_sort!(codes :: CodeV, ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, WorkspaceKeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.radix_sort!(codes :: CodeV, ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, WorkspaceKeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
             TileSize > 0 || throw(ArgumentError("TileSize must be positive"))
             NThreadgroups > 0 || throw(ArgumentError("NThreadgroups must be positive"))
             ThreadsPerGroup >= 32 || throw(ArgumentError("ThreadsPerGroup must be at least one Metal SIMD group"))
@@ -18,18 +18,31 @@ for (KeyT, NPasses) in (
             ntiles = cld(nelems, TileSize)
 
             # Allocate/reuse global workspace and prepare the pass-wide bucket
-            # starts used by decoupled lookback.
+            # starts shared by the direct-prefix passes.
             resize_base_workspace!(ws, nelems, ntiles)
             prepare_bucket_offsets!(ws, codes, Val(NThreadgroups), Val(ThreadsPerGroup))
 
-            # Launch one 8-bit OneSweep pass per byte of the key type.
+            # Launch one forward-progress-safe 8-bit pass per byte. Rank/count,
+            # bucket-prefix finalization, and scatter are separate dispatches;
+            # no Metal threadgroup waits for another threadgroup in-kernel.
+            rank_groups = min(NThreadgroups, ntiles)
             @nexprs $NPasses digit -> begin
                 reset_pass_workspace!(ws)
-                @metal threads=(ThreadsPerGroup,) groups=(NThreadgroups,) onesweep_pass_kernel!(
+                @metal threads=(ThreadsPerGroup,) groups=(rank_groups,) onesweep_direct_rank_kernel!(
                     codes,
                     ws,
                     Val(TileSize),
                     Val(ThreadsPerGroup),
+                    Val(digit),
+                )
+                @metal threads=(256,) groups=(1,) onesweep_direct_prefix_kernel!(
+                    ws.lookback,
+                    ntiles,
+                )
+                @metal threads=(ThreadsPerGroup,) groups=(ntiles,) onesweep_direct_scatter_kernel!(
+                    codes,
+                    ws,
+                    Val(TileSize),
                     Val(digit),
                 )
             end
@@ -39,12 +52,12 @@ for (KeyT, NPasses) in (
             return nothing
         end
 
-        function UnsignedRadixSorts.onesweep_sort!(codes :: CodeV, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, TileSize, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.radix_sort!(codes :: CodeV, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, TileSize, NThreadgroups, ThreadsPerGroup}
             Workspace = OnesweepWorkspace(MtlVector{$KeyT})
-            return onesweep_sort!(codes, Workspace, Val(TileSize), Val(NThreadgroups), Val(ThreadsPerGroup))
+            return radix_sort!(codes, Workspace, Val(TileSize), Val(NThreadgroups), Val(ThreadsPerGroup))
         end
 
-        function UnsignedRadixSorts.onesweep_sortperm!(codes :: CodeV, ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, WorkspaceKeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.radix_sortperm!(codes :: CodeV, ws :: OnesweepWorkspace{$KeyT, WorkspaceKeyV, OffsetV}, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, WorkspaceKeyV <: MtlVector{$KeyT}, OffsetV <: MtlVector{UInt32}, TileSize, NThreadgroups, ThreadsPerGroup}
             TileSize > 0 || throw(ArgumentError("TileSize must be positive"))
             NThreadgroups > 0 || throw(ArgumentError("NThreadgroups must be positive"))
             ThreadsPerGroup >= 32 || throw(ArgumentError("ThreadsPerGroup must be at least one Metal SIMD group"))
@@ -61,14 +74,27 @@ for (KeyT, NPasses) in (
             initialize_perm_workspace_for_sort!(ws, nelems, ntiles, Val(NThreadgroups), Val(ThreadsPerGroup))
             prepare_bucket_offsets!(ws, codes, Val(NThreadgroups), Val(ThreadsPerGroup))
 
-            # Launch one 8-bit OneSweep key/value pass per byte of the key type.
+            # Launch the same three-dispatch pass for paired key/permutation
+            # sorting. The rank phase is shared; only the final scatter writes
+            # the permutation value alongside its key.
+            rank_groups = min(NThreadgroups, ntiles)
             @nexprs $NPasses digit -> begin
                 reset_pass_workspace!(ws)
-                @metal threads=(ThreadsPerGroup,) groups=(NThreadgroups,) onesweep_perm_pass_kernel!(
+                @metal threads=(ThreadsPerGroup,) groups=(rank_groups,) onesweep_direct_rank_kernel!(
                     codes,
                     ws,
                     Val(TileSize),
                     Val(ThreadsPerGroup),
+                    Val(digit),
+                )
+                @metal threads=(256,) groups=(1,) onesweep_direct_prefix_kernel!(
+                    ws.lookback,
+                    ntiles,
+                )
+                @metal threads=(ThreadsPerGroup,) groups=(ntiles,) onesweep_direct_perm_scatter_kernel!(
+                    codes,
+                    ws,
+                    Val(TileSize),
                     Val(digit),
                 )
             end
@@ -79,9 +105,9 @@ for (KeyT, NPasses) in (
             return $(isodd(NPasses) ? :(ws.perms[2]) : :(ws.perms[1]))
         end
 
-        function UnsignedRadixSorts.onesweep_sortperm!(codes :: CodeV, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, TileSize, NThreadgroups, ThreadsPerGroup}
+        function UnsignedRadixSorts.radix_sortperm!(codes :: CodeV, :: Val{TileSize} = Val(2048), :: Val{NThreadgroups} = Val(128), :: Val{ThreadsPerGroup} = Val(256)) where {CodeV <: MtlVector{$KeyT}, TileSize, NThreadgroups, ThreadsPerGroup}
             Workspace = OnesweepWorkspace(MtlVector{$KeyT})
-            return onesweep_sortperm!(codes, Workspace, Val(TileSize), Val(NThreadgroups), Val(ThreadsPerGroup))
+            return radix_sortperm!(codes, Workspace, Val(TileSize), Val(NThreadgroups), Val(ThreadsPerGroup))
         end
     end
 end

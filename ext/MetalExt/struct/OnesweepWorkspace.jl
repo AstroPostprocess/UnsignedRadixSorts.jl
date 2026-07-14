@@ -50,6 +50,9 @@ function resize_base_workspace!(
     resize!(ws.tile_counter, 1)
     resize!(ws.lookback, 256 * ntiles)
     resize!(ws.bucket_offsets, 256 * npass)
+    # Metal's forward-progress-safe pass persists each element's rank within
+    # its radix bucket across the rank, prefix, and scatter dispatches.
+    resize!(ws.local_ranks, nelems)
 
     return nothing
 end
