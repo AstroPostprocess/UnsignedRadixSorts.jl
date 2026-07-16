@@ -27,13 +27,9 @@ Metal exposes the corresponding `radix_sort!` and `radix_sortperm!` entry points
 
 Supported key types are unsigned integer vectors. The CPU implementation supports `UInt8`, `UInt16`, `UInt32`, `UInt64`, and `UInt128`. The CUDA and Metal extensions currently target `UInt8`, `UInt16`, `UInt32`, and `UInt64` device vectors.
 
-Install from a local checkout or repository URL:
-
 ```julia
 using Pkg
-Pkg.develop(path = "/path/to/UnsignedRadixSorts.jl")
-# or
-Pkg.add(url = "https://github.com/AstroPostprocess/UnsignedRadixSorts.jl")
+Pkg.add("UnsignedRadixSorts")
 ```
 
 After installation, a typical CPU usage looks like:
